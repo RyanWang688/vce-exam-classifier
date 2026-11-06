@@ -9,7 +9,9 @@
 - [ ] 用扫描版试卷跑一次
 - [ ] 由老师逐题核对知识点，第 7 轮只有一份卷，样本太小
 - [x] 解决置信度不能区分难判题目的问题（第 8 轮，跨知识点题已解决）
-- [ ] 让模型识别“分类表缺项”：arctan 求和题仍被判为 `clear`
+- [ ] 稳定识别超出 Unit 范围的题：arctan 求和题 Word 版抓到，PDF 版没抓到（第 9 轮）
+- [ ] 由老师确认 Foundation 和 Methods Units 1/2 的知识点粒度是否够用
+- [ ] 需要时补充理科 Units 1/2
 - [ ] 提高图片定位稳定性：同一页两次运行，一次框得过大，一次很准
 - [ ] 确认逐字转录真题时 `RECITATION` 中断的频率
 - [ ] 确认单份试卷的耗时和 Token 用量
@@ -19,6 +21,47 @@
 - [ ] 确认第二轮定位增加的 Token 用量和免费层频率是否够用
 - [ ] 确认 AI 识别的出版方、试卷名和每题页码是否准确
 - [ ] 用手机拍的试卷跑一次，确认识别和定位在模糊、倾斜时的效果
+
+## 第 9 轮：2026-11-06，分类表覆盖全部 VCE 数学
+
+**对照 VCAA 原文的发现**
+
+- 数列和级数不在 Specialist Units 3/4 里，属于 Units 1/2。所以 arctan 求和题不是分类表漏项，而是超出了本卷 Unit 的范围。
+- 之前的分类表有遗漏，原因是当时按文字长度筛选标题，长标题被过滤了。这次改按文档的标题样式提取。
+
+**分类表改动（共 7 科 116 个知识点）**
+
+| 科目 | Units 3/4 | Units 1/2 |
+|---|---|---|
+| Foundation Mathematics（新增） | 4 | 4 |
+| Mathematical Methods | 7 | 4（新增） |
+| Specialist Mathematics | 13 | 12（新增） |
+| General Mathematics | 18 | 8（新增） |
+| Chemistry / Physics / Biology | 14 / 16 / 16 | 未加入 |
+
+补上的遗漏：Specialist 的 `Hypothesis testing for a population mean`，General 的 `Compound interest investment with periodic and equal additions to the principal`，Chemistry 和 Physics 的 `Scientific evidence`。
+
+**规则和提示词**
+
+- 新规则：知识点在分类表里但不属于本卷 Unit 时，自动标记复核。
+- 提示词要求优先使用本卷 Unit 的知识点。
+
+**真实测试**
+
+| | Word | PDF |
+|---|---|---|
+| 标记复核 | 4 / 11（Q3、Q8、Q9、Q11） | 3 / 10（Q3、Q7、Q8） |
+| arctan 求和题 | **标记成功**，备选为 Sequences and series | **没有标记**，`clear` |
+| 配图 | 4 / 4 | 4 / 4，第 6 页的框上沿略高 |
+| 总 Token | 19,914 | 21,347 |
+
+- 新的 Unit 规则这轮没有被触发：模型都没有把 Sequences and series 作为主知识点。Word 版是通过“跨知识点”标记的。
+- 所以补全分类表有帮助，但这个问题没有彻底解决。
+- 知识点在几轮之间变化的只有 PDF Q7 和 Word Q8，都在标记范围内。
+- 这轮 Word 版的 Q9 没有标记为 PDF 第 8 轮那样的多标，判断仍有波动。
+- 只有一份试卷，不再继续调提示词，避免过拟合。
+
+**没测过：** Foundation、General、Methods 的试卷，以及 Unit 1/2 试卷。
 
 ## 第 8 轮：2026-11-06，用规则判定复核
 

@@ -33,6 +33,7 @@ npx serve .
 - 跨知识点（`topic_fit` 为 `split`）
 - 分类表没有合适的知识点（`poor`）或判为 `Other`
 - 知识点不在分类表中
+- 知识点属于其他 Unit，比如 Unit 3/4 试卷出现 Unit 1/2 内容
 - 题目内容可能没读准
 
 勾选“只看需要复核的题”可以只处理这些题。没被标记不代表一定正确：测试中有一道分类表缺项的题就没被标记，所以初期建议抽查。
@@ -106,8 +107,16 @@ AI 识别的来源可以在结果页修改，修改会应用到全部题目。�
 
 分类表来自 VCAA Study Design（Mathematics 2023 起，Physics 和 Chemistry 的 Units 3/4 2024 起，Biology 2022 起）：
 
-- 除 Methods 外，知识点使用文档的 Key knowledge 或内容小标题原文。
-- Mathematical Methods 原文只有四个 Area of Study，微积分和概率统计是按文档内容再细分的。
+| 科目 | 范围 |
+|---|---|
+| Foundation、General、Methods、Specialist Mathematics | Units 1/2 和 3/4 |
+| Chemistry、Physics、Biology | Units 3/4 |
+
+- 有内容小标题的知识点使用原文；Foundation 和 Methods 原文大多只到 Area of Study。
+- Mathematical Methods Units 3/4 的微积分和概率统计，是按文档内容再细分的。
+- `Hypothesis testing for a population mean` 是原标题的缩写。
+
+如果你在页面上改过分类表，浏览器会继续使用你的版本。想用新版请点“恢复默认”。
 
 ## 项目结构
 

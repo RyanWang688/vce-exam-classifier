@@ -112,6 +112,7 @@ export function buildPrompt(taxonomy, kind = 'pdf') {
     '',
     'TOPIC RULES',
     '- topic must be copied exactly, character for character, from the list for this subject in the taxonomy below.',
+    '- Use the list for the unit of this paper first. Use a topic from the subject\'s other unit only when nothing in this paper\'s unit describes the skill being tested. Do not stretch a broad topic to cover it.',
     '- If several topics apply, choose the main one. If the question truly belongs to none of them, use "Other". Never invent a topic.',
     '- topic_fit: judge this strictly from what the marks test. "clear" if one taxonomy topic covers at least two thirds of the marks. "split" if more than one third of the marks test a different taxonomy topic. "poor" if no taxonomy topic really describes the skill being tested, even if you chose the closest one.',
     '- alternative_topics: the other taxonomy topics this question tests, copied exactly, most relevant first, at most two. Use an empty array when topic_fit is "clear", unless "poor" has a next closest topic.',

@@ -1,6 +1,20 @@
-// 分类表：与 index.html 的 DEFAULT_TAXONOMY 相同。知识点来自 VCAA Study Design 的 Units 3/4 内容。
-// 增加 Unit 1/2 时，在科目下加一个 "Unit 1/2" 列表即可。
+// 分类表：与 index.html 的 DEFAULT_TAXONOMY 相同，来自 VCAA Study Design。
+// 四门数学覆盖 Units 1-4，理科目前是 Units 3/4。
 export const TAXONOMY = {
+  'Foundation Mathematics': {
+    'Unit 3/4': [
+      'Algebra, number and structure',
+      'Data analysis, probability and statistics',
+      'Financial and consumer mathematics',
+      'Space and measurement',
+    ],
+    'Unit 1/2': [
+      'Algebra, number and structure',
+      'Data analysis, probability and statistics',
+      'Financial and consumer mathematics',
+      'Space and measurement',
+    ],
+  },
   'Mathematical Methods': { 'Unit 3/4': [
     'Functions, relations and graphs',
     'Algebra, number and structure',
@@ -9,6 +23,11 @@ export const TAXONOMY = {
     'Probability: discrete random variables',
     'Probability: continuous random variables',
     'Statistics: sample proportions and confidence intervals',
+  ], 'Unit 1/2': [
+    'Functions, relations and graphs',
+    'Algebra, number and structure',
+    'Calculus',
+    'Data analysis, probability and statistics',
   ] },
   'Specialist Mathematics': { 'Unit 3/4': [
     'Logic and proof',
@@ -23,6 +42,20 @@ export const TAXONOMY = {
     'Distribution of linear combinations of random variables',
     'Distribution of the sample mean',
     'Confidence intervals for the population mean',
+    'Hypothesis testing for a population mean',
+  ], 'Unit 1/2': [
+    'Proof and number',
+    'Graph theory',
+    'Logic and algorithms',
+    'Sequences and series',
+    'Combinatorics',
+    'Matrices',
+    'Simulation, sampling and sampling distributions',
+    'Trigonometry',
+    'Transformations',
+    'Vectors in the plane',
+    'Complex numbers',
+    'Functions, relations and graphs',
   ] },
   'General Mathematics': { 'Unit 3/4': [
     'Investigating data distributions',
@@ -33,6 +66,7 @@ export const TAXONOMY = {
     'Compound interest investments and loans',
     'Reducing balance loans',
     'Annuities and perpetuities',
+    'Compound interest investment with periodic and equal additions to the principal',
     'Matrices and their applications',
     'Transition matrices',
     'Graphs and networks',
@@ -42,6 +76,15 @@ export const TAXONOMY = {
     'Shortest path problems',
     'Matching problems',
     'Scheduling problems and critical path analysis',
+  ], 'Unit 1/2': [
+    'Investigating and comparing data distributions',
+    'Arithmetic and geometric sequences, first-order linear recurrence relations and financial mathematics',
+    'Linear functions, graphs, equations and models',
+    'Matrices',
+    'Investigating relationships between two numerical variables',
+    'Graphs and networks',
+    'Variation',
+    'Space, measurement and applications of trigonometry',
   ] },
   'Chemistry': { 'Unit 3/4': [
     'Carbon-based fuels',
@@ -56,6 +99,7 @@ export const TAXONOMY = {
     'Instrumental analysis of organic compounds',
     'Medicinal chemistry',
     'Investigation design',
+    'Scientific evidence',
     'Science communication',
   ] },
   'Physics': { 'Unit 3/4': [
@@ -73,6 +117,7 @@ export const TAXONOMY = {
     "Einstein's special theory of relativity",
     'Relationship between energy and mass',
     'Investigation design',
+    'Scientific evidence',
     'Science communication',
   ] },
   'Biology': { 'Unit 3/4': [

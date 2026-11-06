@@ -257,7 +257,7 @@
           <button id="resetTax" type="button">恢复默认</button>
           <span class="hint" id="taxStatus"></span>
         </div>
-        <p class="hint" style="margin-top:8px">知识点取自 VCAA Study Design 的 Units 3/4 Key knowledge 小标题。需要 Unit 1/2 时，在科目下增加 <code>"Unit 1/2"</code> 列表即可。</p>
+        <p class="hint" style="margin-top:8px">知识点取自 VCAA Study Design。四门数学覆盖 Units 1-4，理科目前是 Units 3/4，需要时可在科目下增加 <code>"Unit 1/2"</code> 列表。</p>
       </details>
     </section>
   </aside>
@@ -401,10 +401,24 @@ const QUESTION_TYPES = [
 const DIFFICULTIES = [['easy', '简单'], ['medium', '中等'], ['hard', '困难']];
 const OTHER_TOPIC = 'Other';
 
-// 主题取自 VCAA Study Design 的 Units 3/4 内容：
-// Physics/Chemistry/Biology/General/Specialist 使用 Key knowledge 或内容小标题原文；
-// Mathematical Methods 原文只有四个 Area of Study，这里按其内容再细分了微积分与概率统计。
+// 主题取自 VCAA Study Design。四门数学覆盖 Units 1-4，理科目前只有 Units 3/4。
+// 有内容小标题的使用小标题原文；Foundation 和 Methods 原文大多只到 Area of Study。
+// Mathematical Methods Units 3/4 按其内容再细分了微积分与概率统计。
 const DEFAULT_TAXONOMY = {
+  'Foundation Mathematics': {
+    'Unit 3/4': [
+      'Algebra, number and structure',
+      'Data analysis, probability and statistics',
+      'Financial and consumer mathematics',
+      'Space and measurement',
+    ],
+    'Unit 1/2': [
+      'Algebra, number and structure',
+      'Data analysis, probability and statistics',
+      'Financial and consumer mathematics',
+      'Space and measurement',
+    ],
+  },
   'Mathematical Methods': { 'Unit 3/4': [
     'Functions, relations and graphs',
     'Algebra, number and structure',
@@ -413,6 +427,11 @@ const DEFAULT_TAXONOMY = {
     'Probability: discrete random variables',
     'Probability: continuous random variables',
     'Statistics: sample proportions and confidence intervals',
+  ], 'Unit 1/2': [
+    'Functions, relations and graphs',
+    'Algebra, number and structure',
+    'Calculus',
+    'Data analysis, probability and statistics',
   ] },
   'Specialist Mathematics': { 'Unit 3/4': [
     'Logic and proof',
@@ -427,6 +446,20 @@ const DEFAULT_TAXONOMY = {
     'Distribution of linear combinations of random variables',
     'Distribution of the sample mean',
     'Confidence intervals for the population mean',
+    'Hypothesis testing for a population mean',
+  ], 'Unit 1/2': [
+    'Proof and number',
+    'Graph theory',
+    'Logic and algorithms',
+    'Sequences and series',
+    'Combinatorics',
+    'Matrices',
+    'Simulation, sampling and sampling distributions',
+    'Trigonometry',
+    'Transformations',
+    'Vectors in the plane',
+    'Complex numbers',
+    'Functions, relations and graphs',
   ] },
   'General Mathematics': { 'Unit 3/4': [
     'Investigating data distributions',
@@ -437,6 +470,7 @@ const DEFAULT_TAXONOMY = {
     'Compound interest investments and loans',
     'Reducing balance loans',
     'Annuities and perpetuities',
+    'Compound interest investment with periodic and equal additions to the principal',
     'Matrices and their applications',
     'Transition matrices',
     'Graphs and networks',
@@ -446,6 +480,15 @@ const DEFAULT_TAXONOMY = {
     'Shortest path problems',
     'Matching problems',
     'Scheduling problems and critical path analysis',
+  ], 'Unit 1/2': [
+    'Investigating and comparing data distributions',
+    'Arithmetic and geometric sequences, first-order linear recurrence relations and financial mathematics',
+    'Linear functions, graphs, equations and models',
+    'Matrices',
+    'Investigating relationships between two numerical variables',
+    'Graphs and networks',
+    'Variation',
+    'Space, measurement and applications of trigonometry',
   ] },
   'Chemistry': { 'Unit 3/4': [
     'Carbon-based fuels',
@@ -460,6 +503,7 @@ const DEFAULT_TAXONOMY = {
     'Instrumental analysis of organic compounds',
     'Medicinal chemistry',
     'Investigation design',
+    'Scientific evidence',
     'Science communication',
   ] },
   'Physics': { 'Unit 3/4': [
@@ -477,6 +521,7 @@ const DEFAULT_TAXONOMY = {
     "Einstein's special theory of relativity",
     'Relationship between energy and mass',
     'Investigation design',
+    'Scientific evidence',
     'Science communication',
   ] },
   'Biology': { 'Unit 3/4': [
@@ -650,6 +695,7 @@ function buildPrompt(taxonomy, kind = 'pdf') {
     '',
     'TOPIC RULES',
     '- topic must be copied exactly, character for character, from the list for this subject in the taxonomy below.',
+    '- Use the list for the unit of this paper first. Use a topic from the subject\'s other unit only when nothing in this paper\'s unit describes the skill being tested. Do not stretch a broad topic to cover it.',
     '- If several topics apply, choose the main one. If the question truly belongs to none of them, use "Other". Never invent a topic.',
     '- topic_fit: judge this strictly from what the marks test. "clear" if one taxonomy topic covers at least two thirds of the marks. "split" if more than one third of the marks test a different taxonomy topic. "poor" if no taxonomy topic really describes the skill being tested, even if you chose the closest one.',
     '- alternative_topics: the other taxonomy topics this question tests, copied exactly, most relevant first, at most two. Use an empty array when topic_fit is "clear", unless "poor" has a next closest topic.',
@@ -1508,11 +1554,20 @@ function prepareQuestions(raw, taxonomy, subject) {
 const isTopicKnown = (q) => q.topic === OTHER_TOPIC || topicsForSubject(state.taxonomy, state.paper.subject).includes(q.topic);
 const isEdited = (q) => ['topic', 'question_type', 'difficulty'].some((f) => q[f] !== q.ai[f]);
 
+// 知识点在分类表里，但不属于这份试卷的 Unit，例如 Unit 3/4 试卷出现 Unit 1/2 内容。
+function isOutsidePaperUnit(q) {
+  const subject = String(state.paper.subject || '').trim().toLowerCase();
+  const key = Object.keys(state.taxonomy).find((name) => name.toLowerCase() === subject);
+  const list = key && state.taxonomy[key][state.paper.unit];
+  return Boolean(list) && q.topic !== OTHER_TOPIC && isTopicKnown(q) && !list.includes(q.topic);
+}
+
 // 复核由规则决定：模型自评分数几乎总是很高，不能单独作为依据。
 function reviewReasons(q) {
   const reasons = [];
   const alternatives = q.alternative_topics.join('、');
   if (!isTopicKnown(q)) reasons.push('知识点不在分类表中');
+  if (isOutsidePaperUnit(q)) reasons.push(`知识点属于其他 Unit，超出本卷 ${state.paper.unit} 的范围`);
   if (q.ai.topic === OTHER_TOPIC) reasons.push('AI 判定不属于分类表');
   if (q.topic_fit === 'poor') reasons.push(`分类表没有合适的知识点${alternatives ? `，接近的还有 ${alternatives}` : ''}`);
   if (q.topic_fit === 'split') reasons.push(`同时涉及其他知识点${alternatives ? `：${alternatives}` : ''}`);
