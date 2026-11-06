@@ -228,8 +228,6 @@
         <span>AI 服务</span>
         <select id="provider">
           <option value="gemini">Google Gemini</option>
-          <option value="openrouter">OpenRouter（免费备选）</option>
-          <option value="ollama">本地 Ollama（免费，不出电脑）</option>
           <option value="rules">非 AI 模式（规则算法，免费，不出电脑）</option>
         </select>
       </label>
@@ -381,7 +379,7 @@
 
 /* ---------- 常量 ---------- */
 const DEFAULT_MODEL = 'gemini-3.6-flash';
-// 模型和额度核对于 2026-11-06。OpenRouter 免费模型会变动，用不了时在页面上换一个。
+// 模型和额度核对于 2026-11-06。
 const PROVIDERS = {
   gemini: {
     label: 'Gemini API Key',
@@ -389,25 +387,6 @@ const PROVIDERS = {
     models: ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'],
     needsKey: true,
     hint: '免费层额度按模型分开计算，实测 gemini-3.6-flash 每天 20 次请求，以 Google AI Studio 显示为准。',
-  },
-  openrouter: {
-    label: 'OpenRouter API Key',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'nvidia/nemotron-3.5-super-vl:free',
-    models: ['nvidia/nemotron-3.5-super-vl:free', 'dots-studio/dots-3-note-preview:free', 'openrouter/free'],
-    needsKey: true,
-    hint: '免费模型每天 50 次、每分钟 20 次，失败的请求也可能计入。PDF 会转成页面图片发送。内容由模型提供方处理，部分提供方可能保留或用于训练，不要上传校内卷或学生信息。',
-  },
-  ollama: {
-    label: 'API Key',
-    baseUrl: 'http://localhost:11434/v1',
-    model: 'qwen3-vl:8b',
-    models: ['qwen3-vl:8b', 'qwen3-vl:4b', 'gemma4:12b'],
-    needsKey: false,
-    imageAsString: true, // Ollama 文档的 image_url 是字符串，不是 { url } 对象。
-    pageSidePx: 1400, // 2200 像素每页约 3500 Token，8GB 显存放不下，模型会落到 CPU。
-    timeoutMs: 30 * 60 * 1000,
-    hint: '在本机运行，没有次数限制，内容不出电脑。实测 8GB 显存约 4 页要 10 分钟，知识点准确率低，只适合处理不能外传的短卷。需要用 localhost 打开本页，步骤见 README。',
   },
   rules: {
     label: 'API Key',
@@ -953,73 +932,6 @@ function requireJson({ response, data, rawText }) {
   return data;
 }
 
-// 分类用的 schema 是 Gemini 格式，OpenAI 兼容接口要标准 JSON Schema。
-function toJsonSchema(schema) {
-  const type = schema.type.toLowerCase();
-  const out = { type: schema.nullable ? [type, 'null'] : type };
-  if (schema.enum) out.enum = schema.enum;
-  if (schema.items) out.items = toJsonSchema(schema.items);
-  if (schema.properties) {
-    out.properties = Object.fromEntries(Object.entries(schema.properties).map(([k, v]) => [k, toJsonSchema(v)]));
-    out.required = schema.required || Object.keys(schema.properties);
-    out.additionalProperties = false;
-  }
-  return out;
-}
-
-function toOpenAiContent(parts, provider) {
-  return parts.map((part) => {
-    if (part.text) return { type: 'text', text: part.text };
-    const url = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-    return { type: 'image_url', image_url: provider.imageAsString ? url : { url } };
-  });
-}
-
-// 整理成 Gemini 的返回结构，后面的解析就不用区分来源。
-function fromOpenAiResponse(data) {
-  const choice = (data.choices || [])[0];
-  const usage = data.usage || {};
-  const finish = { stop: 'STOP', length: 'MAX_TOKENS', content_filter: 'SAFETY' };
-  const text = String((choice && choice.message && choice.message.content) || '')
-    .trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '');
-  return {
-    candidates: choice ? [{
-      finishReason: finish[choice.finish_reason] || 'STOP',
-      content: { parts: [{ text }] },
-    }] : [],
-    usageMetadata: {
-      promptTokenCount: usage.prompt_tokens,
-      candidatesTokenCount: usage.completion_tokens,
-      totalTokenCount: usage.total_tokens,
-    },
-  };
-}
-
-async function postOpenAi({ provider, apiKey, model, parts, schema, signal }) {
-  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-  const body = {
-    model,
-    temperature: 0,
-    max_tokens: 65536, // 带思考的模型会把这部分也算进去，16000 实测不够一份 Exam 2。
-    messages: [{ role: 'user', content: toOpenAiContent(parts, provider) }],
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: 'exam_result', strict: true, schema: toJsonSchema(schema) },
-    },
-  };
-  const networkMessage = provider.needsKey
-    ? '无法连接 OpenRouter，请检查网络和代理。'
-    : '无法连接本地 Ollama。请确认 Ollama 正在运行，并用 localhost 打开本页。';
-  const result = await sendJson(`${provider.baseUrl}/chat/completions`, headers, body, signal, networkMessage);
-  if (/content safety|moderation/i.test(result.rawText) && !result.response.ok) {
-    throw new UserError('内容被模型提供方拦截', '这个模型的安全审核拒绝了本次请求，请在左侧换一个模型再试。', result.rawText);
-  }
-  if (result.response.status === 429 && provider.needsKey) {
-    throw new UserError('OpenRouter 额度或频率用完（429）', '免费模型每天 50 次、每分钟 20 次。请稍后再试，或换一个 AI 服务。', result.rawText);
-  }
-  return fromOpenAiResponse(requireJson(result));
-}
-
 const currentProvider = () => PROVIDERS[$('provider').value];
 // Gemini 沿用原来的存储位置，已保存的 Key 不受影响。
 const providerStore = (base) => ($('provider').value === 'gemini' ? base : `${base}.${$('provider').value}`);
@@ -1041,11 +953,6 @@ function applyProvider() {
   });
   fillPrices($('model').value);
   renderCost();
-}
-
-function postModel(options) {
-  const provider = currentProvider();
-  return provider.baseUrl ? postOpenAi({ ...options, provider }) : postGemini(options);
 }
 
 async function postGemini({ apiKey, model, parts, schema, signal }) {
@@ -1076,21 +983,10 @@ function assertRequestSize(parts, title, message) {
   if (size > MAX_REQUEST_CHARS) throw new UserError(title, message);
 }
 
-// 按当前 AI 服务的分辨率编码页面；裁图仍使用原来的高清画布。
 function pageJpeg(canvas) {
-  const side = currentProvider().pageSidePx;
-  const scale = side ? Math.min(1, side / Math.max(canvas.width, canvas.height)) : 1;
-  let source = canvas;
-  if (scale < 1) {
-    source = document.createElement('canvas');
-    source.width = Math.round(canvas.width * scale);
-    source.height = Math.round(canvas.height * scale);
-    source.getContext('2d').drawImage(canvas, 0, 0, source.width, source.height);
-  }
-  return source.toDataURL('image/jpeg', 0.85).split(',')[1];
+  return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 }
 
-// 图片上传，以及不能直接读 PDF 的 AI 服务，都按页面图片发送。
 async function buildImageParts(taxonomy) {
   const parts = [];
   const count = await pageCount();
@@ -2451,7 +2347,7 @@ async function postWithRetry(options) {
   const label = $('loaderText').textContent;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await postModel(options);
+      return await postGemini(options);
     } catch (e) {
       const wait = retryWaitSeconds(e, attempt);
       if (wait === null) throw e;
@@ -2974,8 +2870,7 @@ function renderCost() {
 }
 
 function fillPrices(model) {
-  const free = currentProvider().baseUrl || currentProvider().rules; // 备选服务的免费模型不收费。
-  const price = free ? [0, 0] : PRICES[model];
+  const price = currentProvider().rules ? [0, 0] : PRICES[model];
   if (!price) return;
   $('priceIn').value = price[0];
   $('priceOut').value = price[1];
@@ -3049,7 +2944,7 @@ function startTask() {
     signal: controller.signal,
     timedOut: false,
     timer: null,
-    resetTimeout(ms = currentProvider().timeoutMs || REQUEST_TIMEOUT_MS) {
+    resetTimeout(ms = REQUEST_TIMEOUT_MS) {
       clearTimeout(task.timer);
       task.timer = setTimeout(() => {
         task.timedOut = true;
@@ -3153,8 +3048,7 @@ async function analyze() {
       await runRules(taxonomy, started);
       return;
     }
-    const readsPdf = !currentProvider().baseUrl;
-    const builders = { pdf: readsPdf ? buildPdfParts : buildImageParts, docx: buildDocxParts, images: buildImageParts };
+    const builders = { pdf: buildPdfParts, docx: buildDocxParts, images: buildImageParts };
     const parts = await builders[state.sourceKind](taxonomy);
     const data = await postWithRetry({ apiKey, model, parts, schema: RESPONSE_SCHEMA, signal: task.signal });
     const elapsed = performance.now() - started;
@@ -3435,6 +3329,11 @@ function exportCsv() {
 /* ---------- 初始化 ---------- */
 function init() {
   $('dropText').textContent = DROP_HINT;
+  // 已移除的服务留下的 Key 和模型，页面不再使用。
+  ['openrouter', 'ollama'].forEach((name) => {
+    storageSet(`${STORE.key}.${name}`, '');
+    storageSet(`${STORE.model}.${name}`, '');
+  });
   $('provider').value = PROVIDERS[storageGet(STORE.provider)] ? storageGet(STORE.provider) : 'gemini';
   $('priceIn').value = 0;
   $('priceOut').value = 0;
