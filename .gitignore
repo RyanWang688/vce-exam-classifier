@@ -2,6 +2,11 @@
 *.pdf
 *.doc
 *.docx
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.heic
 *-classified.json
 *-classified.csv
 *-classified.zip
