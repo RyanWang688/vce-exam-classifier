@@ -1471,7 +1471,8 @@ function prepareQuestions(raw, taxonomy, subject) {
       question_number: String(q.question_number == null ? '' : q.question_number),
       page: Number.isInteger(q.page) ? q.page : null,
       adapted_from: q.adapted_from || null,
-      section: q.section || null,
+      // Word 的目录表可能只给出 “1”，统一写法后题目 ID 才一致。
+      section: /^\d+$/.test(String(q.section)) ? `Section ${q.section}` : (q.section || null),
       text: String(q.text || ''),
       sub_parts: Array.isArray(q.sub_parts) ? q.sub_parts : [],
       figures: prepareFigures(q.figures, questionIndex),
