@@ -11,6 +11,7 @@
 *-classified.csv
 *-classified.zip
 tmp-fixtures/
+review/
 
 .env
 .env.*
