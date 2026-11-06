@@ -397,7 +397,9 @@ const PROVIDERS = {
     models: ['qwen3-vl:8b', 'qwen3-vl:4b', 'gemma4:12b'],
     needsKey: false,
     imageAsString: true, // Ollama 文档的 image_url 是字符串，不是 { url } 对象。
-    hint: '在本机运行，没有次数限制，内容不出电脑。需要先安装 Ollama 并下载模型，并用 localhost 打开本页（不能双击）。步骤见 README。',
+    pageSidePx: 1400, // 2200 像素每页约 3500 Token，8GB 显存放不下，模型会落到 CPU。
+    timeoutMs: 30 * 60 * 1000,
+    hint: '在本机运行，没有次数限制，内容不出电脑。实测 8GB 显存约 4 页要 10 分钟，知识点准确率低，只适合处理不能外传的短卷。需要用 localhost 打开本页，步骤见 README。',
   },
 };
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -1057,14 +1059,27 @@ function assertRequestSize(parts, title, message) {
   if (size > MAX_REQUEST_CHARS) throw new UserError(title, message);
 }
 
+// 按当前 AI 服务的分辨率编码页面；裁图仍使用原来的高清画布。
+function pageJpeg(canvas) {
+  const side = currentProvider().pageSidePx;
+  const scale = side ? Math.min(1, side / Math.max(canvas.width, canvas.height)) : 1;
+  let source = canvas;
+  if (scale < 1) {
+    source = document.createElement('canvas');
+    source.width = Math.round(canvas.width * scale);
+    source.height = Math.round(canvas.height * scale);
+    source.getContext('2d').drawImage(canvas, 0, 0, source.width, source.height);
+  }
+  return source.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
 // 图片上传，以及不能直接读 PDF 的 AI 服务，都按页面图片发送。
 async function buildImageParts(taxonomy) {
   const parts = [];
   const count = await pageCount();
   for (let page = 1; page <= count; page++) {
-    const canvas = await getPageCanvas(page);
     parts.push({ text: `Page ${page}:` });
-    parts.push({ inlineData: { mimeType: 'image/jpeg', data: canvas.toDataURL('image/jpeg', 0.85).split(',')[1] } });
+    parts.push({ inlineData: { mimeType: 'image/jpeg', data: pageJpeg(await getPageCanvas(page)) } });
   }
   parts.push({ text: buildPrompt(taxonomy, 'images') });
   assertRequestSize(parts, '图片总量过大', '压缩后仍超过 20MB。请减少一次上传的页数，分批分析。');
@@ -2270,7 +2285,7 @@ function startTask() {
     signal: controller.signal,
     timedOut: false,
     timer: null,
-    resetTimeout(ms = REQUEST_TIMEOUT_MS) {
+    resetTimeout(ms = currentProvider().timeoutMs || REQUEST_TIMEOUT_MS) {
       clearTimeout(task.timer);
       task.timer = setTimeout(() => {
         task.timedOut = true;
