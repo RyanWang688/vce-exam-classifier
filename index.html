@@ -149,6 +149,7 @@
   .qno { font-weight: 700; font-size: 15px; }
   .tag { padding: 0 7px; font-size: 12px; border-radius: 10px; background: #eaeef2; color: var(--muted); }
   .tag.conf { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .tag.warn { background: #fde8e0; color: #8a2c0d; font-weight: 600; }
   .tag.lowc { background: var(--warn-line); color: #4d3000; font-weight: 600; }
   .tag.offt { background: var(--danger); color: #fff; font-weight: 600; }
   .tag.edit { background: var(--accent-soft); color: var(--accent); }
@@ -2557,13 +2558,24 @@ function tryFraction(rule, atoms, bars, rules) {
   const width = rule.x1 - rule.x0;
   if (width > 280) return null;
   const within = (a) => centerX(a) >= rule.x0 - 1 && centerX(a) <= rule.x1 + 1;
-  const above = atoms.filter((a) => within(a) && a.bottom <= ruleY + 1.5 && a.bottom >= ruleY - a.size * 0.95);
-  const below = atoms.filter((a) => within(a) && a.top >= ruleY - 1.5 && a.top <= ruleY + a.size * 0.95);
-  if (!above.length || !below.length) return null;
+  const nearAbove = atoms.filter((a) => within(a) && a.bottom <= ruleY + 1.5 && a.bottom >= ruleY - a.size * 0.95);
+  const nearBelow = atoms.filter((a) => within(a) && a.top >= ruleY - 1.5 && a.top <= ruleY + a.size * 0.95);
+  if (!nearAbove.length || !nearBelow.length) return null;
+  // 分数夹在两行正文之间时，分数线上方可能同时有分子和上一行的字：只取最贴近分数线的那一行。
+  const lowest = Math.max(...nearAbove.map((a) => a.bottom));
+  const highest = Math.min(...nearBelow.map((a) => a.top));
+  const above = nearAbove.filter((a) => a.bottom >= lowest - a.size * 0.5);
+  const below = nearBelow.filter((a) => a.top <= highest + a.size * 0.5);
+  // 一行文字正好压在分数线上方时，那行字两侧还有内容，不是分子。
+  const runsPast = (group) => group.some((a) => !a.box && atoms.some((b) => !group.includes(b) && !b.box && Math.abs(b.y - a.y) < 1 &&
+    Math.max(b.x0 - a.x1, a.x0 - b.x1) < a.size * 0.5 && !within(b)));
+  if (runsPast(above) || runsPast(below)) return null;
   // 分子分母的上下标离分数线更远，跟着收进来。
   const grow = (seed, isAbove) => {
     const set = new Set(seed);
-    const scale = Math.max(...seed.map((a) => a.size));
+    // 放大的括号不能抬高基准字号，否则上一行的正文会被当成上标收进来。
+    const plainSeed = seed.filter((a) => !isDelimiterChar(a.ch) && !a.box);
+    const scale = Math.max(...(plainSeed.length ? plainSeed : seed).map((a) => a.size));
     let changed = true;
     while (changed) {
       changed = false;
@@ -2579,6 +2591,9 @@ function tryFraction(rule, atoms, bars, rules) {
   const top = grow(above, true);
   const bottom = grow(below, false);
   if (Math.max(widthOf(top), widthOf(bottom)) < width * 0.55) return null;
+  // 分子分母里混进完整英文单词，说明抓到了相邻行。
+  const hasWords = (group) => /[a-z]{3,}/.test([...group].filter((a) => !a.italic && !a.box).sort((a, b) => a.x0 - b.x0).map((a) => a.ch).join('').replace(/arcsin|arccos|arctan|sin|cos|tan|log|sec|cot/g, ''));
+  if (hasWords(top) || hasWords(bottom)) return null;
   // 表格线的端点连着竖线或另一段横线。
   const touches = (x) => bars.some((b) => Math.abs(b.x0 - x) <= 1.5 && b.y0 <= ruleY + 1.5 && b.y1 >= ruleY - 1.5) ||
     rules.some((r) => r !== rule && r.x1 - r.x0 >= 12 && Math.abs((r.y0 + r.y1) / 2 - ruleY) <= 1 && (Math.abs(r.x1 - x) <= 1.5 || Math.abs(r.x0 - x) <= 1.5)); // 短的是负号。
@@ -3291,7 +3306,34 @@ function layoutRows(layout, viewport, number) {
     Math.abs(centerX(a) - viewport.width / 2) < viewport.width * 0.08 &&
     !atoms.some((b) => !/^\d$/.test(b.ch) && Math.abs(b.y - a.y) < 1.5 && Math.abs(centerX(b) - centerX(a)) < viewport.width * 0.2));
   pageNumbers.forEach((a) => atoms.splice(atoms.indexOf(a), 1));
+  const strayBars = [];
   atoms.push(...(layout.extraAtoms || []));
+  // 绝对值的竖线是画出来的：成对、等高、和文字同一行。
+  // 矩阵方括号中间的竖线不是绝对值。
+  const inBracket = (b) => layout.brackets.some((m) => Math.min(Math.abs(m.x0 - b.x0), Math.abs(m.x1 - b.x0)) <= 2 && b.y0 <= m.y1 + 24 && b.y1 >= m.y0 - 24);
+  const lineBars = layout.bars.filter((b) => b.y1 - b.y0 >= 7 && b.y1 - b.y0 <= 34 && !inBracket(b) &&
+    !layout.rules.some((r) => r.x1 - r.x0 >= 12 && r.y0 <= b.y1 + 1.5 && r.y1 >= b.y0 - 1.5 && r.x0 <= b.x1 + 1.5 && r.x1 >= b.x0 - 1.5));
+  const usedBars = new Set();
+  lineBars.sort((a, b) => a.x0 - b.x0).forEach((bar) => {
+    if (usedBars.has(bar)) return;
+    const twin = lineBars.find((b) => b !== bar && !usedBars.has(b) && b.x0 > bar.x0 + 3 && b.x0 - bar.x0 < 160 && Math.abs(b.y0 - bar.y0) < 1 && Math.abs(b.y1 - bar.y1) < 1);
+    const inside = (x0, x1) => atoms.filter((a) => a.x0 >= x0 - 1 && a.x1 <= x1 + 1 && a.y >= bar.y0 && a.y <= bar.y1 + 2);
+    const content = twin ? inside(bar.x0, twin.x0) : [];
+    if (!content.length) {
+      // 单独一条竖线挨着文字：不确定是什么，要提示复核。
+      if (atoms.some((a) => a.y >= bar.y0 && a.y <= bar.y1 + 2 && Math.abs(a.x0 - bar.x1) < 6)) strayBars.push(bar);
+      return;
+    }
+    usedBars.add(bar);
+    usedBars.add(twin);
+    [bar, twin].forEach((b) => {
+      const near = content.reduce((best, a) => (Math.abs(a.size - 12) < Math.abs(best.size - 12) ? a : best));
+      atoms.push({
+        ch: '|', x0: b.x0 - 0.5, x1: b.x1 + 0.5, y: near.y, size: near.size, top: b.y0, bottom: b.y1,
+        italic: false, bold: false, symbol: true, floating: true,
+      });
+    });
+  });
   // 单独一条弧线多半是图里的曲线，括号必须成对出现。
   const paired = (layout.strokes || []).filter((mark) => mark.ch === '∫' || (layout.strokes || []).some((other) => other !== mark &&
     other.ch !== mark.ch && other.ch !== '∫' && Math.abs(other.top - mark.top) <= 2 && Math.abs(other.bottom - mark.bottom) <= 2));
@@ -3349,6 +3391,7 @@ function layoutRows(layout, viewport, number) {
       list.some((a) => centerX(a) >= r.x0 && centerX(a) <= r.x1 && a.bottom <= r.y0 + 1 && a.bottom >= r.y0 - 12) &&
       list.some((a) => centerX(a) >= r.x0 && centerX(a) <= r.x1 && a.top >= r.y1 - 1 && a.top <= r.y1 + 12));
     if (missed) problems.push('可能有没认出来的分数');
+    if (strayBars.some((b) => b.y0 >= lineTop - 6 && b.y1 <= lineBottom + 6)) problems.push('有没认出来的竖线');
     rows.push({
       y: line.y, left: Math.min(...line.atoms.map((a) => a.x0)), top: Math.min(...line.atoms.map((a) => a.top)),
       text, page: number, ocr: false, math_problems: problems,
@@ -3359,7 +3402,9 @@ function layoutRows(layout, viewport, number) {
 
 // 分类词典写的是普通文字：公式里的 LaTeX 要先还原。
 function latexToPlain(text) {
-  let out = text.replace(/\\[()[\]]/g, ' ').replace(/\\(?:begin|end)\{[^{}]*\}(?:\{[^{}]*\})?|\\hline|\\hphantom\{[^{}]*\}/g, ' ').replace(/&|\\\\/g, ' ');
+  let out = text.replace(/\\displaystyle/g, ' ').replace(/\\underset\{\\sim\}\{(?:\\mathrm\{)?([a-zA-Z])\}?\}/g, '$1')
+    .replace(/\\overrightarrow\{([^{}]*)\}/g, '$1').replace(/_\{([^{}]*)\}/g, '_$1').replace(/\^\{([^{}]*)\}/g, '^$1')
+    .replace(/\\[()[\]]/g, ' ').replace(/\\(?:begin|end)\{[^{}]*\}(?:\{[^{}]*\})?|\\hline|\\hphantom\{[^{}]*\}/g, ' ').replace(/&|\\\\/g, ' ');
   const frac = /\\frac\{([^{}]*)\}\{([^{}]*)\}/;
   while (frac.test(out)) out = out.replace(frac, '($1)/($2)');
   return out
@@ -3370,8 +3415,9 @@ function latexToPlain(text) {
     .replace(/\\ /g, ' ')
     .replace(/\\int/g, '∫').replace(/\\sum/g, '∑').replace(/\\le\b/g, '≤').replace(/\\ge\b/g, '≥')
     .replace(/\\times/g, '×').replace(/\\div/g, '÷').replace(/\\ne\b/g, '≠').replace(/\\in\b/g, '∈').replace(/\\infty/g, '∞')
-    .replace(/\\pi\b/g, 'π').replace(/\\theta\b/g, 'θ').replace(/\\mu\b/g, 'μ').replace(/\\sigma\b/g, 'σ')
-    .replace(/\\to\b/g, '→').replace(/\\([a-zA-Z]+)/g, '$1').replace(/_\{([^{}]*)\}/g, '_$1').replace(/\^\{([^{}]*)\}/g, '^$1');
+    .replace(/\\circ\b/g, '∘').replace(/\\pi\b/g, 'π').replace(/\\theta\b/g, 'θ').replace(/\\mu\b/g, 'μ').replace(/\\sigma\b/g, 'σ')
+    .replace(/\\to\b/g, '→').replace(/\\([a-zA-Z]+)/g, '$1').replace(/_\{([^{}]*)\}/g, '_$1').replace(/\^\{([^{}]*)\}/g, '^$1')
+    .replace(/[ \t]+/g, ' ');
 }
 
 // 图片没有 PDF 的页面尺寸，换算成 A4 宽度，后面的规则都按这个尺度。
@@ -4011,13 +4057,27 @@ function parseQuestions(rows) {
   let section = null;
   let area = null;
 
+  // 一个小问写完分值后出现的文字，是后面小问的共同背景，不属于前一问。
+  let lead = [];
+  let context = '';
+  const flushLead = () => {
+    if (lead.length && part) part.text = [part.text, ...lead].filter(Boolean).join('\n');
+    lead = [];
+    context = '';
+  };
   const addLine = (text) => {
     if (!question || !text) return;
+    if (part && part.marks !== null && !/^(?:Give|Round|Correct|Express|Leave|Write your)\b/.test(text)) { lead.push(text); return; }
     if (part) part.text = part.text ? `${part.text}\n${text}` : text;
     else question.text = question.text ? `${question.text}\n${text}` : text;
   };
   const addPart = (label, text) => {
-    part = { label, text, marks: null };
+    if (lead.length) {
+      context = lead.join('\n');
+      text = [context, text].filter(Boolean).join('\n');
+      lead = [];
+    }
+    part = { label, text, marks: null, context };
     question.sub_parts.push(part);
   };
 
@@ -4061,6 +4121,7 @@ function parseQuestions(rows) {
     }
     if (heading) {
       const { marks, adapted_from: adaptedFrom, inline } = parseQuestionHeading(heading);
+      flushLead();
       question = {
         question_number: heading[1], section, area, marks, adapted_from: adaptedFrom,
         text: inline, sub_parts: [], options: 0, images: [], math_problems: [...(row.math_problems || [])],
@@ -4131,6 +4192,7 @@ function parseQuestions(rows) {
     }
     if (trailing && part) part.marks = Number(trailing[2] || trailing[3]);
   }
+  flushLead();
   return questions;
 }
 
@@ -4287,6 +4349,32 @@ function regionBounds(questions, pages) {
   });
 }
 
+// 图上的轴名、点名和坐标被当成文字遮掉了，裁图时要把它们收回来；整行正文不算。
+function fitFigureToLabels(block, rects, width, height) {
+  // 标注的字母很少；文字块不带空格，不能按单词数判断。
+  const shortText = (rect) => rect.right - rect.left < width * 0.3 && ((rect.text || '').match(/[a-z]/gi) || []).length <= 12 && !/^(?:Question|[a-h]\.)/.test((rect.text || '').trim());
+  // 和长句在同一行的公式片段也是正文。
+  const isLabel = (rect) => shortText(rect) && !rects.some((other) => other !== rect && !shortText(other) && other.top < rect.bottom && other.bottom > rect.top);
+  const fit = { ...block };
+  for (let pass = 0; pass < 3; pass++) {
+    rects.filter(isLabel).forEach((rect) => {
+      const near = rect.left <= fit.right + width * 0.04 && rect.right >= fit.left - width * 0.04 &&
+        rect.top <= fit.bottom + height * 0.012 && rect.bottom >= fit.top - height * 0.012;
+      if (!near) return;
+      fit.left = Math.min(fit.left, rect.left);
+      fit.right = Math.max(fit.right, rect.right);
+      fit.top = Math.min(fit.top, rect.top);
+      fit.bottom = Math.max(fit.bottom, rect.bottom);
+    });
+  }
+  const body = rects.filter((rect) => !isLabel(rect) && rect.left < fit.right && rect.right > fit.left);
+  const above = body.filter((rect) => rect.bottom <= fit.top + 2).map((rect) => rect.bottom);
+  const below = body.filter((rect) => rect.top >= fit.bottom - 2).map((rect) => rect.top);
+  fit.ceiling = above.length ? Math.max(...above) : 0;
+  fit.floor = below.length ? Math.min(...below) : height;
+  return fit;
+}
+
 async function attachPdfImages(questions, onProgress) {
   const inkCache = new Map();
   for (let index = 0; index < questions.length; index++) {
@@ -4303,17 +4391,22 @@ async function attachPdfImages(questions, onProgress) {
         const { allRects } = await bodyTextRects(region.page, width, height);
         const body = buildInkMap(canvas, allRects); // 遮掉全部文字，剩下图形和表格。
         stripRuleLines(body);
-        inkCache.set(region.page, { body, all: buildInkMap(canvas, []) });
+        inkCache.set(region.page, { body, all: buildInkMap(canvas, []), rects: allRects });
       }
       const maps = inkCache.get(region.page);
       const blocks = inkBlocks(maps.body, region.topRatio, region.bottomRatio);
-      blocks.forEach((block) => {
+      const textRects = maps.rects;
+      blocks.forEach((rawBlock) => {
+        const block = fitFigureToLabels(rawBlock, textRects, maps.body.width, maps.body.height);
         const box = [
           block.top / maps.body.height * 1000, block.left / maps.body.width * 1000,
           block.bottom / maps.body.height * 1000, block.right / maps.body.width * 1000,
         ];
         // 文字被遮掉后，框要外扩一些才能带上坐标刻度和标签。
-        const padded = padBox(padBox(padBox(box.map(Math.round))));
+        // 外扩不能越过上下的正文，否则会带入相邻题文。
+        const padded = padBox(box.map(Math.round));
+        padded[0] = Math.max(padded[0], block.ceiling / maps.body.height * 1000);
+        padded[2] = Math.min(padded[2], block.floor / maps.body.height * 1000);
         q.figures.push({
           id: `rule-${q.question_number}-${q.figures.length}`,
           page: region.page, box: padded, image: cropImage(canvas, padded), status: 'ok', source: 'rules',
@@ -4369,7 +4462,7 @@ const TOPIC_KEYWORDS = {
     'Space, measurement and applications of trigonometry': ['bearing', 'sine rule', 'cosine rule', 'angle of elevation', 'pythagoras', 'surface area', 'volume'],
   },
   'Mathematical Methods': {
-    'Functions, relations and graphs': ['range of', 'domain', 'asymptote', 'transformation', 'dilation', 'translation', 'reflection', 'graph of', 'sketch', 'intercept', 'period', 'amplitude', '~function', '~parabola', '~graph', '~curve'],
+    'Functions, relations and graphs': ['∘', 'composite', 'range of', 'domain', 'asymptote', 'transformation', 'dilation', 'translation', 'reflection', 'graph of', 'sketch', 'intercept', 'period', 'amplitude', '~function', '~parabola', '~graph', '~curve'],
     'Algebra, number and structure': ['~equation', '~parameter', '~values of', '~rule for', '~product function', '!the inverse of', 'inverse function', 'composite', 'composition', 'simultaneous', 'system of equations', 'solutions', 'solve', 'algorithm', 'pseudocode', 'factor', 'polynomial', 'g∘f', 'f∘g', '\\circ', 'has an inverse', 'real value', 'one solution', 'no solution'],
     'Calculus: differentiation': ['~smooth', '~local', '~tangents', '~cylinder', '~volume', '~largest possible', "f'(", 'f’(', 'fʹ(', "g'(", 'g’(', 'gʹ(', 'gradient of the tangent', '!maximis', '!minimis', 'derivative', 'differentiat', 'stationary point', 'gradient', 'tangent', 'maximum', 'minimum', 'rate of change', "newton's method", 'point of inflection', 'optimis', 'dy', 'simplify', 'shortest', 'perpendicular', 'normal to'],
     'Calculus: anti-differentiation and integration': ['!trapezium rule', '!anti-derivative', 'has the derivative', 'integral', 'integrate', 'anti-deriv', 'antideriv', 'area bounded', 'area between', 'area of the region', 'trapezium', 'average value', 'average rate', '\\int', '∫', 'dx', 'evaluate', 'total area'],
@@ -4381,18 +4474,18 @@ const TOPIC_KEYWORDS = {
   },
   'Specialist Mathematics': {
     'Logic and proof': ['prove', 'proof', 'contradiction', 'induction', 'contrapositive', 'converse', 'counter-example', 'counterexample', 'quantifier', 'conjecture'],
-    'Functions, relations and graphs': ['rational function', 'asymptote', 'partial fraction', 'sketch', 'graph of', 'maximal domain', 'point of inflexion', 'point of inflection', 'quotient'],
-    'Complex numbers': ['complex', 'argand', 'de moivre', 'cis', 'polar form', 'conjugate', 'roots of', 'perpendicular bisector', 'locus', 'loci'],
+    'Functions, relations and graphs': ['~sin', '~cos', '~tan', '~domain', '~range', 'rational function', 'asymptote', 'partial fraction', 'sketch', 'graph of', 'maximal domain', 'implied domain', 'point of inflexion', 'point of inflection', 'quotient'],
+    'Complex numbers': ['!z∈ c', '!z∈c', '!∈ c', '!∈c', '!re (', '!re(', '!im (', '!im(', '!arg (', '!arg(', '!|z', 'complex', 'argand', 'de moivre', 'cis', 'polar form', 'conjugate', 'roots of', 'perpendicular bisector', 'locus', 'loci', 'modulus', 'imaginary'],
     'Differential calculus and integral calculus': ['!implicit', '!solid of revolution', '!integration by parts', 'derivative', 'differentiat', 'integral', 'integrate', 'integration by parts', 'anti-deriv', 'arc length', 'surface area', 'surface of revolution', 'volume of', 'solid of revolution', 'rotated about', 'tangent line', 'stationary point', '\\int', '∫', 'evaluate', 'dx', 'dy', 'concave', 'length of the curve'],
     'Differential equations': ['!pseudocode', '~iterations', 'differential equation', 'logistic', "euler's method", 'slope field', 'direction field', 'separation of variables', 'rate proportional', 'tank'],
     'Kinematics: rectilinear motion': ['~metres', '~rising', '~dropped', '~seconds', 'velocity', 'acceleration', 'displacement', 'moves along a straight', 'straight line', 'at rest', 'ms −1'],
     'Vectors': ['vector', 'dot product', 'scalar product', 'cross product', 'scalar resolute', 'vector resolute', 'linearly dependent', 'linearly independent', 'unit vector', 'parallelogram', 'pyramid', 'parallel vectors'],
     'Vector and Cartesian equations': ['!equation of the plane', '!planes', '!skew', '~lines', '~plane', 'vector equation', 'cartesian equation', 'parametric', 'equation of a line', 'plane contains', 'the plane', 'line passes'],
     'Vector calculus': ['!position vector', '!velocity vector', 'vector function', 'collide', 'r( )t', 'r(t)'],
-    'Distribution of linear combinations of random variables': ['linear combination', 'independent random variables', 'var(', 'normally distributed', 'independent of', 'combined', 'total time'],
-    'Distribution of the sample mean': ['sample mean', 'x-bar', 'sampling distribution', 'mean of a random sample', 'mean of the sample'],
-    'Confidence intervals for the population mean': ['!confidence interval'],
-    'Hypothesis testing for a population mean': ['!hypothesis test', 'hypothesis', 'p-value', 'significance', 'null', 'one-tailed', 'two-tailed', 'type i', 'h0'],
+    'Distribution of linear combinations of random variables': ['linear combination', 'independent random variables', 'var(', 'variance', 'normally distributed', 'independent of', 'combined', 'total time'],
+    'Distribution of the sample mean': ['!sampling distribution', 'sample mean', 'x-bar', 'mean of a random sample', 'mean of the sample', 'random sample of', 'average volume', 'average mass', 'average time'],
+    'Confidence intervals for the population mean': ['!confidence interval', '!confidence level'],
+    'Hypothesis testing for a population mean': ['!hypothesis test', '!hypotheses', '!p value', '!p-value', '!level of significance', '!statistical test', 'hypothesis', 'significance', 'null', 'one-tailed', 'two-tailed', 'type i', 'h0'],
     'Proof and number': ['rational', 'irrational', 'divisible', 'prime', 'prove'],
     'Graph theory': ['vertices', 'edges', 'euler', 'hamiltonian', 'planar'],
     'Logic and algorithms': ['truth table', 'algorithm', 'pseudocode', 'boolean', 'logic gate'],
@@ -4453,8 +4546,18 @@ function keywordWeight(word) {
   return word.includes(' ') ? 3 : 1;
 }
 
-function scoreTopic(text, keywords) {
-  return keywords.reduce((total, word) => {
+// 字典写不下的模式：2 − 3i 这样的复数一看就是复数题。
+const TOPIC_PATTERNS = {
+  'Complex numbers': /(?:^|[^a-z])\d*\s*[-+−]\s*\d*\s*i(?![a-z])|\bz\s*=\s*-?\d|\bz\^\d|√\([^)]*\)i(?![a-z])/,
+  'Differential calculus and integral calculus': /\bf\^?'\s*\(/,
+};
+
+function scoreTopic(text, keywords, topic) {
+  const pattern = TOPIC_PATTERNS[topic];
+  // 向量 2i − 3j + k 也有 i，同时出现 j 或 k 时不算复数。
+  const isVector = topic === 'Complex numbers' && /\d?\s*[jk](?![a-z])\s*[-+−=,).]|[-+−]\s*\d*\s*[jk](?![a-z])/.test(text);
+  const extra = pattern && pattern.test(text) && !isVector ? 8 : 0;
+  return extra + keywords.reduce((total, word) => {
     const bare = word.replace(/^[!~]/, '');
     const count = Math.min(3, (text.match(keywordPattern(bare)) || []).length);
     return total + count * keywordWeight(word);
@@ -4463,10 +4566,14 @@ function scoreTopic(text, keywords) {
 
 function bestTopics(text, candidates, subject) {
   return candidates
-    .map((topic) => ({ topic, score: scoreTopic(text, keywordsFor(subject, topic)) }))
+    .map((topic) => ({ topic, score: scoreTopic(text, keywordsFor(subject, topic), subject === 'Specialist Mathematics' ? topic : '') }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score);
 }
+
+const UNRECOGNISED_REASON = '词典没有命中：是算法没认出来，不代表分类表里没有这个知识点。';
+// 统计类大题常用“平均容量”“最小样本量”这样的日常词，容易命中微积分词典。整题主要是统计时，小问只在统计知识点里选。
+const STATISTICS_TOPIC = /sample mean|confidence interval|hypothesis|linear combinations of random|random variable|sampling/i;
 
 // 大题各小问考的内容不同：先逐个小问判断，再按分值投票。
 function classifyByKeywords(q, paper, taxonomy) {
@@ -4474,7 +4581,7 @@ function classifyByKeywords(q, paper, taxonomy) {
   const stem = latexToPlain(q.text).toLowerCase();
   const whole = `${stem}\n${q.sub_parts.map((p) => latexToPlain(p.text)).join('\n')}`.toLowerCase();
   const wholeBest = bestTopics(whole, candidates, paper.subject);
-  if (!wholeBest.length) return { topic: OTHER_TOPIC, topic_fit: 'poor', alternative_topics: [], reason: '题面没有命中任何关键词。' };
+  if (!wholeBest.length) return { topic: OTHER_TOPIC, topic_fit: 'poor', alternative_topics: [], reason: UNRECOGNISED_REASON };
 
   const scoredParts = q.sub_parts.filter((p) => (p.marks || 0) > 0);
   if (!scoredParts.length) {
@@ -4488,17 +4595,24 @@ function classifyByKeywords(q, paper, taxonomy) {
     };
   }
 
+  const total = wholeBest.reduce((sum, item) => sum + item.score, 0);
+  const statistics = wholeBest.filter((item) => STATISTICS_TOPIC.test(item.topic)).reduce((sum, item) => sum + item.score, 0);
+  const partCandidates = statistics >= total * 0.5 ? candidates.filter((topic) => STATISTICS_TOPIC.test(topic)) : candidates;
+  const inherited = partCandidates === candidates ? wholeBest[0].topic : (wholeBest.find((item) => STATISTICS_TOPIC.test(item.topic)) || wholeBest[0]).topic;
   const votes = new Map();
+  let previous = null;
   scoredParts.forEach((part) => {
-    // 小问自己没有命中时，沿用题干和全题的判断。
-    const own = bestTopics(latexToPlain(part.text).toLowerCase(), candidates, paper.subject)[0];
-    const topic = own ? own.topic : wholeBest[0].topic;
+    // 小问自己没有命中时，看它前面的引导文字，再沿用上一问，最后才用全题的判断。
+    const own = bestTopics(latexToPlain(part.text).toLowerCase(), partCandidates, paper.subject)[0] ||
+      bestTopics(latexToPlain(part.context || '').toLowerCase(), partCandidates, paper.subject)[0];
+    const topic = own ? own.topic : previous || inherited;
+    previous = topic;
     part.topic = topic;
     votes.set(topic, (votes.get(topic) || 0) + part.marks);
   });
-  const total = [...votes.values()].reduce((sum, value) => sum + value, 0);
+  const markTotal = [...votes.values()].reduce((sum, value) => sum + value, 0);
   const ranked = [...votes.entries()].sort((a, b) => b[1] - a[1]);
-  const others = ranked.slice(1).filter(([, marks]) => marks >= total / 3).slice(0, 2).map(([topic]) => topic);
+  const others = ranked.slice(1).filter(([, marks]) => marks >= markTotal / 3).slice(0, 2).map(([topic]) => topic);
   return {
     topic: ranked[0][0],
     topic_fit: others.length ? 'split' : 'clear',
@@ -4705,6 +4819,7 @@ async function bodyTextRects(pageNumber, width, height) {
     right: Math.ceil(line.right * scaleX) + 2,
     top: Math.floor(line.top * scaleY) - 2,
     bottom: Math.ceil(line.bottom * scaleY) + 2,
+    text: line.text,
   });
   return { rects: all.filter(isBody).map(toRect), allRects: all.map(toRect), lineCount: all.length };
 }
@@ -5084,8 +5199,8 @@ function reviewReasons(q) {
   const alternatives = q.alternative_topics.join('、');
   if (!isTopicKnown(q)) reasons.push('知识点不在分类表中');
   if (isOutsidePaperUnit(q)) reasons.push(`知识点属于其他 Unit，超出本卷 ${state.paper.unit} 的范围`);
-  if (q.ai.topic === OTHER_TOPIC) reasons.push('AI 判定不属于分类表');
-  if (q.topic_fit === 'poor') reasons.push(`分类表没有合适的知识点${alternatives ? `，接近的还有 ${alternatives}` : ''}`);
+  if (q.ai.topic === OTHER_TOPIC) reasons.push(q.reason === UNRECOGNISED_REASON ? '算法没认出知识点，请人工选择' : 'AI 判定不属于分类表');
+  if (q.topic_fit === 'poor' && q.reason !== UNRECOGNISED_REASON) reasons.push(`分类表没有合适的知识点${alternatives ? `，接近的还有 ${alternatives}` : ''}`);
   // 判为 clear 却列了备选，说明模型自己也有疑虑。
   if (q.topic_fit === 'split' || (q.topic_fit === 'clear' && alternatives)) {
     reasons.push(`同时涉及其他知识点${alternatives ? `：${alternatives}` : ''}`);
@@ -5288,7 +5403,10 @@ function renderCard(q) {
   head.append(el('span', 'qno', `第 ${q.question_number} 题`));
   if (q.section) head.append(el('span', 'tag', q.section));
   if (q.marks != null) head.append(el('span', 'tag', `${q.marks} 分`));
-  head.append(flags, el('span', 'tag conf', `置信度 ${q.confidence.toFixed(2)}`));
+  // 算法模式没有真实的置信度，显示 1.00 会误导。公式状态单独显示。
+  head.append(flags);
+  if ((q.math_problems || []).length) head.append(el('span', 'tag warn', '公式需复核'));
+  if (!currentProvider().rules) head.append(el('span', 'tag conf', `分类置信度 ${q.confidence.toFixed(2)}`));
   const sourceLine = el('div', 'source-line');
   card.append(head, sourceLine, el('div', 'qtext', q.text));
   if (q.snapshot) {
