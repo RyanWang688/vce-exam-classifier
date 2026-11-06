@@ -1,0 +1,10 @@
+# 试卷和导出结果可能受版权保护，不进仓库
+*.pdf
+*-classified.json
+*-classified.csv
+
+.env
+.env.*
+node_modules/
+.DS_Store
+Thumbs.db
