@@ -1570,7 +1570,10 @@ function reviewReasons(q) {
   if (isOutsidePaperUnit(q)) reasons.push(`知识点属于其他 Unit，超出本卷 ${state.paper.unit} 的范围`);
   if (q.ai.topic === OTHER_TOPIC) reasons.push('AI 判定不属于分类表');
   if (q.topic_fit === 'poor') reasons.push(`分类表没有合适的知识点${alternatives ? `，接近的还有 ${alternatives}` : ''}`);
-  if (q.topic_fit === 'split') reasons.push(`同时涉及其他知识点${alternatives ? `：${alternatives}` : ''}`);
+  // 判为 clear 却列了备选，说明模型自己也有疑虑。
+  if (q.topic_fit === 'split' || (q.topic_fit === 'clear' && alternatives)) {
+    reasons.push(`同时涉及其他知识点${alternatives ? `：${alternatives}` : ''}`);
+  }
   if (q.confidence < LOW_CONFIDENCE) reasons.push('题目内容可能没读准');
   return reasons;
 }
