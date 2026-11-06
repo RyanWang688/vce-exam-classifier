@@ -21,13 +21,31 @@ npx serve .
 1. 在 [Google AI Studio](https://aistudio.google.com/apikey) 创建 API Key，填入页面。
 2. 上传 20MB 以内的 PDF 试卷，点击“开始分析”。
 3. 检查高亮的题目，修改分类并勾选“已确认”。
-4. 导出 JSON 或 CSV。
+4. 检查每张自动截图，必要时点“调整”重新框选。
+5. 导出 JSON、CSV，或含图片的 ZIP。
 
 > API Key 保存在浏览器 localStorage，**只能用于本地测试**。正式版见 [WIX_GUIDE.md](WIX_GUIDE.md)。
 
 ## 怎么判断 AI 效果
 
 页面顶部的“已确认题 AI 准确率”是已确认的题目中，三个分类字段都没被改动的比例。导出文件保留了 AI 原值（`ai_topic` 等字段），可以用来逐题对比。
+
+## 题目配图
+
+分析分两轮：
+
+1. 第一轮用 PDF 切题分类，同时记录每张图在哪一页。
+2. 第二轮用 PDF.js 渲染含图页面，让 Gemini 返回边界框，浏览器再按边界框裁剪。
+
+第二轮会增加请求次数和 Token，用量已计入页面统计。定位失败不影响分类结果，可以手动框选。
+
+| 导出格式 | 图片 |
+|---|---|
+| JSON | 以 base64 内嵌在 `figures[].image` |
+| CSV | 只写文件路径，图片在 ZIP 里 |
+| ZIP | `questions.json`、`questions.csv` 和 `figures/` 文件夹 |
+
+截图来自试卷原件，公开使用前请确认版权许可。
 
 ## 默认模型
 
