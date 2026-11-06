@@ -982,7 +982,7 @@ async function postOpenAi({ provider, apiKey, model, parts, schema, signal }) {
   const body = {
     model,
     temperature: 0,
-    max_tokens: 16000,
+    max_tokens: 65536, // 带思考的模型会把这部分也算进去，16000 实测不够一份 Exam 2。
     messages: [{ role: 'user', content: toOpenAiContent(parts, provider) }],
     response_format: {
       type: 'json_schema',
@@ -993,6 +993,9 @@ async function postOpenAi({ provider, apiKey, model, parts, schema, signal }) {
     ? '无法连接 OpenRouter，请检查网络和代理。'
     : '无法连接本地 Ollama。请确认 Ollama 正在运行，并用 localhost 打开本页。';
   const result = await sendJson(`${provider.baseUrl}/chat/completions`, headers, body, signal, networkMessage);
+  if (/content safety|moderation/i.test(result.rawText) && !result.response.ok) {
+    throw new UserError('内容被模型提供方拦截', '这个模型的安全审核拒绝了本次请求，请在左侧换一个模型再试。', result.rawText);
+  }
   if (result.response.status === 429 && provider.needsKey) {
     throw new UserError('OpenRouter 额度或频率用完（429）', '免费模型每天 50 次、每分钟 20 次。请稍后再试，或换一个 AI 服务。', result.rawText);
   }
