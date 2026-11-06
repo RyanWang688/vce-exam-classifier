@@ -31,7 +31,7 @@ saveQuestions() ────────────▶ bulkInsert ────�
 
 如果任务一直停在 `running`，说明后端被终止了，请改用第 8 节的备用方案。
 
-> **题目配图尚未迁移。** 本地 demo 已能自动截图，但 `wix/` 的代码还没有这部分，提示词也是第 1 轮的版本。建议用真实试卷验证定位精度后再迁移。迁移时，页面渲染和裁剪仍要在浏览器完成（Dashboard 里用 HTML iframe 运行 PDF.js），截图上传到 Media Manager，`Questions` 再加一个图片字段。
+> **题目配图和 Word 上传尚未迁移。** 本地 demo 已支持，但 `wix/` 的代码目前只处理 PDF 的文字和分类。建议用真实试卷验证效果后再迁移。Word 解析依赖浏览器的 DOMParser，迁移时要放在 HTML iframe 里运行。迁移时，页面渲染和裁剪仍要在浏览器完成（Dashboard 里用 HTML iframe 运行 PDF.js），截图上传到 Media Manager，`Questions` 再加一个图片字段。
 
 ## 2. 与原方案不同的地方
 

@@ -1,7 +1,11 @@
 # 试卷和导出结果可能受版权保护，不进仓库
 *.pdf
+*.doc
+*.docx
 *-classified.json
 *-classified.csv
+*-classified.zip
+tmp-fixtures/
 
 .env
 .env.*
