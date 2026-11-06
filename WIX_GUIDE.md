@@ -73,6 +73,7 @@ saveQuestions() ────────────▶ bulkInsert ────�
 | Question Number | `questionNumber` | Text |
 | Section | `section` | Text |
 | Source Page | `sourcePage` | Number |
+| Adapted From | `adaptedFrom` | Text（题目改编自哪份试卷，如 `2022 SM Exam 1`） |
 
 `sourceId` 由出版方、年份、试卷名、类型、Section 和题号生成，同一道题重复导入时 ID 相同。`bulkInsert` 不会自动按它去重，正式入库前要先查询已有的 `sourceId`，或者把它的值同时写入 `_id`。
 

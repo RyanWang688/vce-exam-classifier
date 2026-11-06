@@ -44,7 +44,7 @@ Word 文档有这些限制，遇到时建议另存为 PDF 再上传：
 
 - MathType 等旧式公式读不到内容，Word 自带公式没有问题。
 - EMF/WMF 图片、Word 原生形状和图表取不到，可以手动上传替换。
-- 页眉、页脚和脚注不会读取。
+- 脚注不会读取，页眉页脚只读取文字。
 
 旧版 `.doc` 不支持。
 
@@ -75,6 +75,7 @@ Word 文档有这些限制，遇到时建议另存为 PDF 再上传：
 | `source.label` | 给人看的来源，如 `2024 VCAA Physics Written Examination Section B Q1` |
 | `source.publisher` / `paper_title` / `paper_type` / `year` | 可筛选的结构化字段 |
 | `source.page` | 题目在 PDF 里的起始页 |
+| `source.adapted_from` | 卷面标注的改编来源，如 `2022 SM Exam 1` |
 | `source.file` / `file_sha256` | 原文件名和文件指纹，用于追溯和识别重复文件 |
 
 AI 识别的来源可以在结果页修改，修改会应用到全部题目。修改会改变 `source_id`，请在入库前确认好。

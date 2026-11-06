@@ -160,6 +160,7 @@ export const saveQuestions = webMethod(Permissions.Admin, async (paper, question
     questionNumber: q.question_number,
     section: q.section,
     sourcePage: q.page,
+    adaptedFrom: q.adapted_from,
   }));
   const result = await wixData.bulkInsert(QUESTIONS, items, DATA_OPTIONS);
   return { inserted: result.inserted, errors: result.errors.length };

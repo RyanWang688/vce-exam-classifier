@@ -517,13 +517,14 @@ const RESPONSE_SCHEMA = {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
-        propertyOrdering: ['question_number', 'page', 'section', 'text', 'sub_parts', 'figures', 'marks',
+        propertyOrdering: ['question_number', 'page', 'adapted_from', 'section', 'text', 'sub_parts', 'figures', 'marks',
           'topic', 'question_type', 'difficulty', 'confidence'],
-        required: ['question_number', 'page', 'section', 'text', 'sub_parts', 'figures', 'marks',
+        required: ['question_number', 'page', 'adapted_from', 'section', 'text', 'sub_parts', 'figures', 'marks',
           'topic', 'question_type', 'difficulty', 'confidence'],
         properties: {
           question_number: { type: 'STRING' },
           page: nullable('INTEGER'),
+          adapted_from: nullable('STRING'),
           section: nullable('STRING'),
           text: { type: 'STRING' },
           sub_parts: {
@@ -620,7 +621,7 @@ function buildPrompt(taxonomy, kind = 'pdf') {
     '- subject: the matching subject name from the taxonomy, or the subject as printed if none matches.',
     '- unit: "Unit 1/2", "Unit 3/4" or "Unknown".',
     '- paper_type: for example "VCAA Exam 1", "VCAA Exam 2", "SAC", "Practice exam".',
-    '- publisher: the organisation that wrote the paper, for example "VCAA", a school or a commercial exam company, otherwise "Unknown".',
+    '- publisher: the organisation that wrote the paper, for example "VCAA", a school or a commercial exam company. Check headers, footers, copyright lines and logos. Otherwise "Unknown".',
     '- paper_title: the name of the paper as printed, without the publisher or year, for example "Specialist Mathematics Mock SAC 1".',
     '- year: the year printed on the paper, otherwise null.',
     '',
@@ -628,8 +629,9 @@ function buildPrompt(taxonomy, kind = 'pdf') {
     '- Split the paper into individual questions, in paper order. Skip cover pages, instructions, formula sheets and data books. If solutions are included, do not treat them as questions and do not include them.',
     '- A question with parts (3a, 3b, 3c) stays one question: question_number "3", the shared stem in text, and each part in sub_parts with label "a", "b", "c". Use an empty sub_parts array for a question without parts.',
     '- page: the page within this PDF file where the question starts, where the first page of the file is 1, otherwise null.',
-    '- text: the question in its original English. Include all multiple choice options. Describe any diagram or graph briefly as [Diagram: ...].',
-    '- figures: one entry for each diagram, graph, photo or chart needed to answer the question, and an empty array if there are none. page is the page position within this PDF file, where the first page of the file is 1, not the page number printed on the paper. description says briefly what the figure shows. sub_part is the label of the part it belongs to, or null if it belongs to the whole question. Treat figures for multiple choice options as one entry. Ignore logos and decorative images. Ordinary tables that can be written as text are not figures.',
+    '- adapted_from: if the paper says the question was taken or adapted from another paper, the reference only, for example "2022 SM Exam 1" from "(Adapted from 2022 SM Exam 1)". Otherwise null. Leave this note out of text.',
+    '- text: the question in its original English. Leave out blank answer lines and mark allocations. Include all multiple choice options. Describe any diagram or graph briefly as [Diagram: ...].',
+    '- figures: one entry for each diagram, graph, photo or chart needed to answer the question, including blank axes or grids given for students to draw on, and an empty array if there are none. page is the page position within this PDF file, where the first page of the file is 1, not the page number printed on the paper. description says briefly what the figure shows. sub_part is the label of the part it belongs to, or null if it belongs to the whole question. Treat figures for multiple choice options as one entry. Ignore logos and decorative images. Ordinary tables that can be written as text are not figures.',
     '- Write all mathematics in LaTeX, delimited by \\( \\) inline and \\[ \\] for display. Never use $ as a maths delimiter; $ means currency only.',
     '- section: the section name as printed, for example "Section A", otherwise null.',
     '- marks: the marks shown; for a question with parts, the total. Use null if none are shown.',
@@ -1123,13 +1125,24 @@ async function parseDocx(file) {
     numbering: parseNumbering(numberingXml), styles: parseStyleNumbering(stylesXml),
   };
   const body = parseXml(documentXml).getElementsByTagName('w:body')[0];
-  const text = docxWalk(body, ctx).replace(/\n{3,}/g, '\n\n').trim();
+  const text = docxWalk(body, ctx)
+    .replace(/^[\s_.]*_{5,}[\s_.]*$/gm, '') // 答题横线常占正文一半以上，对分类没有帮助。
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  // 出版方常常只写在页眉页脚里。
+  const headerFiles = Object.keys(zip.files).filter((name) => /^word\/(header|footer)\d*\.xml$/.test(name));
+  const headerTexts = await Promise.all(headerFiles.map(async (name) => {
+    const nodes = parseXml(await zip.file(name).async('string')).getElementsByTagName('w:t');
+    return [...nodes].map((node) => node.textContent).join('').trim();
+  }));
+  const headers = [...new Set(headerTexts.filter(Boolean))];
 
   const images = new Map();
   for (const [rId, id] of ctx.imageIds) {
     images.set(id, { name: rels.get(rId), dataUrl: await loadDocxImage(zip, rels.get(rId)) });
   }
-  return { text, images, objects: ctx.objects };
+  return { text, headers, images, objects: ctx.objects };
 }
 
 function docxWarning(parsed) {
@@ -1145,7 +1158,8 @@ async function buildDocxParts(taxonomy) {
   state.docxImages = parsed.images;
   state.docxNote = docxWarning(parsed);
 
-  const parts = [{ text: `DOCUMENT TEXT\n\n${parsed.text}` }];
+  const headerNote = parsed.headers.length ? `HEADERS AND FOOTERS\n${parsed.headers.join('\n')}\n\n` : '';
+  const parts = [{ text: `${headerNote}DOCUMENT TEXT\n\n${parsed.text}` }];
   parsed.images.forEach((image, id) => {
     if (!image.dataUrl) {
       parts.push({ text: `IMAGE ${id}: preview unavailable.` });
@@ -1456,6 +1470,7 @@ function prepareQuestions(raw, taxonomy, subject) {
     return {
       question_number: String(q.question_number == null ? '' : q.question_number),
       page: Number.isInteger(q.page) ? q.page : null,
+      adapted_from: q.adapted_from || null,
       section: q.section || null,
       text: String(q.text || ''),
       sub_parts: Array.isArray(q.sub_parts) ? q.sub_parts : [],
@@ -1706,7 +1721,8 @@ function renderCard(q) {
     refreshCard(card, q, flags);
     renderFigures(q, figureHost);
     const page = q.page ? ` · 第 ${q.page} 页` : '';
-    sourceLine.textContent = `来源：${sourceLabel(q)}${page}`;
+    const origin = q.adapted_from ? ` · 改编自 ${q.adapted_from}` : '';
+    sourceLine.textContent = `来源：${sourceLabel(q)}${page}${origin}`;
     sourceLine.title = `题目 ID：${sourceId(q)}`;
   };
   q.refresh();
@@ -2112,6 +2128,7 @@ function exportRows(embed = true) {
       paper_type: state.paper.paper_type,
       year: state.paper.year,
       page: q.page,
+      adapted_from: q.adapted_from,
       file: state.meta.file,
       file_sha256: state.meta.file_sha256,
     },
@@ -2174,14 +2191,14 @@ function csvCell(value) {
 
 function buildCsv() {
   const header = ['source_id', 'source', 'publisher', 'paper_title', 'subject', 'unit', 'paper_type', 'year',
-    'source_page', 'source_file', 'file_sha256',
+    'source_page', 'adapted_from', 'source_file', 'file_sha256',
     'question_number', 'section', 'text', 'sub_parts', 'figures', 'marks',
     'topic', 'question_type', 'difficulty', 'confidence', 'confirmed', 'edited',
     'ai_topic', 'ai_question_type', 'ai_difficulty'];
   const p = state.paper;
   const rows = exportRows(false).map((q) => [
     q.source_id, q.source.label, p.publisher, p.paper_title, p.subject, p.unit, p.paper_type, p.year,
-    q.source.page, q.source.file, q.source.file_sha256,
+    q.source.page, q.source.adapted_from, q.source.file, q.source.file_sha256,
     q.question_number, q.section, q.text,
     q.sub_parts.map((s) => `(${s.label}) ${s.text}${s.marks == null ? '' : ` [${s.marks}]`}`).join('\n'),
     q.figures.map((f) => f.file || `未截图：第 ${f.page} 页`).join('; '),
