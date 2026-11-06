@@ -1924,6 +1924,8 @@ async function readPageLayout(page, viewport) {
   let pendingRadical = null;
   let pendingBracket = null;
   let pendingOutline = null;
+  let pendingStroke = null;
+  const strokes = [];
   const outlines = [];
   const radicals = [];
   const brackets = [];
@@ -1950,7 +1952,7 @@ async function readPageLayout(page, viewport) {
       if (op === OPS.moveTo || op === OPS.lineTo) { points.push(point(coords[k], coords[k + 1])); k += 2; } else if (op === OPS.closePath) continue;
       else return null;
     }
-    if (points.length < 6 || points.length > 16) return null;
+    if (points.length < 4 || points.length > 16) return null;
     const xs = points.map((q) => q[0]);
     const ys = points.map((q) => q[1]);
     const left = Math.min(...xs);
@@ -2023,6 +2025,29 @@ async function readPageLayout(page, viewport) {
     if (box.x1 - box.x0 > 18 || box.y1 - box.y0 > 34 || box.x1 - box.x0 < 0.5 || box.y1 - box.y0 < 0.5) return null;
     return { ...box, steps };
   };
+  // 浏览器打印的公式：∫ 和高括号是一条贝塞尔曲线。
+  const strokedSymbol = (ops, coords) => {
+    if (ops.length !== 2 || ops[0] !== OPS.moveTo || ops[1] !== OPS.curveTo) return null;
+    const [a, c1, c2, b] = [0, 2, 4, 6].map((i) => point(coords[i], coords[i + 1]));
+    const top = Math.min(a[1], b[1]);
+    const bottom = Math.max(a[1], b[1]);
+    const height = bottom - top;
+    const width = Math.abs(a[0] - b[0]);
+    if (height < 8) return null;
+    const left = Math.min(a[0], b[0], c1[0], c2[0]);
+    const right = Math.max(a[0], b[0], c1[0], c2[0]);
+    if (width > height * 0.12) {
+      // 积分号是一条 S 形曲线：从左下到右上，两个控制点在中线两侧，而且很窄。图里的曲线不满足这些条件。
+      const center = (a[0] + b[0]) / 2;
+      const low = a[1] > b[1] ? a : b;
+      const high = a[1] > b[1] ? b : a;
+      const sShape = (c1[0] - center) * (c2[0] - center) < 0;
+      if (!sShape || low[0] >= high[0] || right - left > height * 0.45 || height > 60) return null;
+      return { ch: '∫', x0: left, x1: right, top, bottom };
+    }
+    const middle = (c1[0] + c2[0]) / 2;
+    return { ch: middle < a[0] ? '(' : ')', x0: left, x1: right, top, bottom };
+  };
   const addBox = (x0, y0, x1, y1) => {
     const box = boxOf(x0, y0, x1, y1);
     // 斜线属于图形，不是分数线。
@@ -2064,6 +2089,7 @@ async function readPageLayout(page, viewport) {
             glyphs.push({
               unicode: glyph.unicode, fontChar: glyph.fontChar, isSpace: glyph.isSpace, font: text.font, fontName: font.name || '',
               x0: m[4], x1: m[4] + advance * text.hScale * Math.abs(m[0]), y: m[5], size: Math.abs(m[3]) * Math.abs(text.size),
+              sheared: Math.abs(m[2]) > Math.abs(m[3]) * 0.05, // 浏览器打印的 PDF 用剪切做斜体，字体本身是正体。
             });
           }
           x += advance + (glyph.isSpace ? text.wordSpace : 0) + text.charSpace;
@@ -2080,6 +2106,8 @@ async function readPageLayout(page, viewport) {
         if (drawn) { pendingRadical = drawn; break; }
         const bracket = bracketPath(ops, coords);
         if (bracket) { pendingBracket = bracket; break; }
+        const stroked = strokedSymbol(ops, coords);
+        if (stroked) { pendingStroke = stroked; break; }
         pendingOutline = outlinePath(ops, coords);
         ops.forEach((op) => {
           if (op === OPS.rectangle) {
@@ -2102,7 +2130,7 @@ async function readPageLayout(page, viewport) {
         });
         break;
       }
-      case OPS.endPath: pending = []; shapes = []; pendingRadical = null; pendingBracket = null; pendingOutline = null; break;
+      case OPS.endPath: pending = []; shapes = []; pendingRadical = null; pendingBracket = null; pendingOutline = null; pendingStroke = null; break;
       case OPS.paintImageXObject:
       case OPS.paintInlineImageXObject:
       case OPS.paintImageMaskXObject: {
@@ -2115,6 +2143,8 @@ async function readPageLayout(page, viewport) {
         if (paints.has(fn)) {
           if (pendingRadical) radicals.push(pendingRadical);
           if (pendingBracket) brackets.push(pendingBracket);
+          if (pendingStroke) strokes.push(pendingStroke);
+          pendingStroke = null;
           if (pendingOutline && fn !== OPS.stroke && fn !== OPS.closeStroke) outlines.push(pendingOutline);
           pendingRadical = null;
           pendingBracket = null;
@@ -2135,6 +2165,7 @@ async function readPageLayout(page, viewport) {
     radicals,
     brackets,
     outlines,
+    strokes,
     figures: figureAreas(drawings),
   };
 }
@@ -2365,7 +2396,7 @@ function makeAtom(glyph) {
     ch: glyph.ch === ARROW_PIECE && /MT-?Extra/i.test(glyph.fontName) ? '˜' : glyph.ch,
     ocrText: Boolean(glyph.ocrText), x0: glyph.x0, x1: glyph.x1, y: glyph.y, size: glyph.size,
     top: glyph.y - glyph.size * 0.72, bottom: glyph.y + glyph.size * 0.22,
-    italic: Boolean(glyph.mathItalic) || /Italic|Oblique/i.test(glyph.fontName),
+    italic: Boolean(glyph.mathItalic) || Boolean(glyph.sheared) || /Italic|Oblique/i.test(glyph.fontName),
     bold: /Bold/i.test(glyph.fontName),
     symbol: /Symbol|Math|Extra/i.test(glyph.fontName),
     // 试卷的公式只用衬线和符号字体，这些字体里的内容都是普通文字。
@@ -2913,7 +2944,7 @@ function buildItems(atoms) {
   const main = sorted.filter((a) => a.size >= base * 0.9);
   const ys = (main.filter((a) => !a.box && !a.delim).length ? main.filter((a) => !a.box && !a.delim) : main).map((a) => a.y).sort((a, b) => a - b);
   const baseline = ys[Math.floor(ys.length / 2)];
-  const isScript = (a) => !a.ocrText && !a.display && !a.box && !a.delim && ((a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.1) ||
+  const isScript = (a) => !a.ocrText && !a.display && !a.box && !a.delim && ((a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.05) ||
     (isLiftedChar(a) && Math.abs(a.y - baseline) > base * 0.16 && Math.abs(a.y - baseline) < base * 0.7));
   const isSmallBox = (a) => a.box && !a.display && a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.1;
   const items = [];
@@ -3002,7 +3033,7 @@ function rawItemsToTex(items) {
     if (previous) {
       const gap = item.x0 - previous.x1;
       if (gap >= item.size * 0.9) out += '\\quad ';
-      else if (gap >= item.size * 0.2 && /[0-9A-Za-z]$/.test(previous.ch || '') && /^[0-9A-Za-z]/.test(item.ch || '')) out += '\\ ';
+      else if (!item.tight && gap >= item.size * 0.2 && /[0-9A-Za-z]$/.test(previous.ch || '') && /^[0-9A-Za-z]/.test(item.ch || '')) out += '\\ ';
     }
     const styledRun = styledWordAt(items, index);
     if (styledRun) {
@@ -3019,7 +3050,7 @@ function rawItemsToTex(items) {
     if (isRomanLetter(item)) {
       let end = index;
       while (end + 1 < items.length && isRomanLetter(items[end + 1]) && !hasScript(items[end]) &&
-        items[end + 1].x0 - items[end].x1 < item.size * WORD_GAP) end += 1;
+        (items[end + 1].tight || items[end + 1].x0 - items[end].x1 < item.size * WORD_GAP)) end += 1;
       const word = items.slice(index, end + 1).map((i) => i.ch).join('');
       const last = items[end];
       const name = TEX_FUNCTIONS[word];
@@ -3067,7 +3098,21 @@ function mergeRoman(items) {
 const isRomanWordStart = (word) => word.filter(isRomanLetter).length >= 2;
 
 // 判断一行里哪些字形是文字、哪些是公式。
+// arctan 这类函数名有时字距很大，要先并起来。
+function joinFunctionNames(items) {
+  const names = ['arcsin', 'arccos', 'arctan', 'cosec', 'sinh', 'cosh', 'tanh', 'sin', 'cos', 'tan', 'sec', 'cot', 'log', 'cis'];
+  items.forEach((item, index) => {
+    names.forEach((name) => {
+      const run = items.slice(index, index + name.length);
+      if (run.length < name.length || run.map((a) => a.ch).join('') !== name) return;
+      const close = run.every((a, k) => !a.box && (k === 0 || a.x0 - run[k - 1].x1 < a.size * 0.35));
+      if (close) run.slice(1).forEach((a) => { a.tight = true; });
+    });
+  });
+}
+
 function classifyItems(items) {
+  joinFunctionNames(items);
   // 封面标题的字母间距很大（M A T H S），不能拆成单个字母。真正的空格字形要保留。
   const hasBlank = (left, right) => pageBlanks.some((b) => b.x0 >= left.x1 - 1 && b.x1 <= right.x0 + 1 && Math.abs(b.y - right.y) < 2);
   const tracked = new Set();
@@ -3091,7 +3136,7 @@ function classifyItems(items) {
   items.forEach((item, i) => {
     const gap = i ? item.x0 - items[i - 1].x1 : 0;
     const wordBreak = i && items[i - 1].ch === ')' && isRomanLetter(item);
-    if (!i || wordBreak || (gap >= Math.min(item.size, items[i - 1].size) * WORD_GAP && !tracked.has(i))) words.push([item]);
+    if (!i || wordBreak || (gap >= Math.min(item.size, items[i - 1].size) * WORD_GAP && !tracked.has(i) && !item.tight)) words.push([item]);
     else words[words.length - 1].push(item);
   });
   const neutral = /^[0-9.,:;!?'"’“”‘\-–—/%$_\u2011]$/;
@@ -3160,6 +3205,17 @@ function renderLine(items) {
   if (items.length === 1 && items[0].display) return `\\[${items[0].tex}\\]`;
   const words = classifyItems(items);
   const flat = words.flatMap((word, w) => word.map((item, i) => ({ item, spaced: i === 0 && w > 0 })));
+  // 紧挨公式的函数名属于公式。
+  for (let i = 0; i < flat.length; i++) {
+    const item = flat[i].item;
+    if (item.kind !== 'T' || !isRomanLetter(item)) continue;
+    let end = i;
+    while (end + 1 < flat.length && flat[end + 1].item.kind === 'T' && isRomanLetter(flat[end + 1].item) && !flat[end + 1].spaced) end += 1;
+    const name = flat.slice(i, end + 1).map((entry) => entry.item.ch).join('');
+    const next = flat[end + 1];
+    if (TEX_FUNCTIONS[name] && next && (next.item.kind === 'M' || next.item.box)) for (let k = i; k <= end; k++) flat[k].item.kind = 'M';
+    i = end;
+  }
   // 夹在公式中间的数字和标点属于公式，比如 x ∈ (0, ∞)。
   const inFormula = (entry) => entry && (entry.item.kind === 'M' || entry.item.box || hasScript(entry.item));
   for (let i = 0; i < flat.length; i++) {
@@ -3167,7 +3223,10 @@ function renderLine(items) {
     let end = i;
     while (end + 1 < flat.length && !inFormula(flat[end + 1]) && !flat[end + 1].item.prose && !/[A-Za-z]/.test(flat[end + 1].item.ch || '')) end += 1;
     const closesBracket = flat[end].item.ch === ')' || (flat[end - 1] && flat[end - 1].item.ch === ')' && flat[end].item.ch === '.');
-    if (inFormula(flat[i - 1]) && (inFormula(flat[end + 1]) || closesBracket)) {
+    const after = flat[end + 1];
+    const hasOperator = flat.slice(i, end + 1).some((entry) => /^[-−+=]$/.test(entry.item.ch || '')) ||
+      Boolean(after && /^[-−+=×÷]$/.test(after.item.ch || ''));
+    if ((inFormula(flat[i - 1]) && (inFormula(flat[end + 1]) || closesBracket)) || (hasOperator && inFormula(flat[end + 1]))) {
       for (let k = i; k <= end; k++) flat[k].item.kind = 'M';
     }
     i = end;
@@ -3227,7 +3286,23 @@ function layoutRows(layout, viewport, number) {
     seen.add(key);
     atoms.push(makeAtom(glyph));
   });
+  // 页码是一组居中的数字，不能跟下一行连成上标。
+  const pageNumbers = atoms.filter((a) => /^\d$/.test(a.ch) && (a.y < viewport.height * 0.075 || a.y > viewport.height * 0.94) &&
+    Math.abs(centerX(a) - viewport.width / 2) < viewport.width * 0.08 &&
+    !atoms.some((b) => !/^\d$/.test(b.ch) && Math.abs(b.y - a.y) < 1.5 && Math.abs(centerX(b) - centerX(a)) < viewport.width * 0.2));
+  pageNumbers.forEach((a) => atoms.splice(atoms.indexOf(a), 1));
   atoms.push(...(layout.extraAtoms || []));
+  // 单独一条弧线多半是图里的曲线，括号必须成对出现。
+  const paired = (layout.strokes || []).filter((mark) => mark.ch === '∫' || (layout.strokes || []).some((other) => other !== mark &&
+    other.ch !== mark.ch && other.ch !== '∫' && Math.abs(other.top - mark.top) <= 2 && Math.abs(other.bottom - mark.bottom) <= 2));
+  paired.forEach((mark) => {
+    const size = 12;
+    const isIntegral = mark.ch === '∫';
+    atoms.push({
+      ch: mark.ch, x0: mark.x0, x1: mark.x1, y: (mark.top + mark.bottom) / 2 + size * 0.28, size, top: mark.top, bottom: mark.bottom,
+      italic: false, bold: false, symbol: true, stacked: true, delim: !isIntegral, tallGlyph: true,
+    });
+  });
   atoms.push(...outlineAtoms(layout.outlines, atoms, layout.figures.filter((f) => (f.x1 - f.x0) * (f.y1 - f.y0) < viewport.width * viewport.height * 0.45)));
   let list = mergeStacks(applyAccents(atoms)).concat(bracketAtoms(layout.brackets));
   list = applyRules(list, layout.rules, layout.bars, layout.radicals);
@@ -3948,7 +4023,7 @@ function parseQuestions(rows) {
 
   for (const row of rows) {
     // Word 里有人把小问编号也写进公式框。
-    let text = row.text.trim().replace(/^\\\(\s*([a-l]|i{1,3}|iv|v)\.\s*\\\)\s*/, '$1. ');
+    let text = row.text.trim().replace(/^\\\(\s*([a-l]|i{1,3}|iv|v)\.\s*\\\)\s*/, '$1. ').replace(/^\\\(\s*([a-l])\s*\\\)\.\s*/, '$1. ');
     // OCR 可能把旁边的残字读到题号前面，比如 “2a Question 6”。
     if (row.ocr) text = fixOcrLine(text.replace(/^\S{1,4}\s+(?=Question\s+\S{1,3}\s*(?:\(|$))/i, ''));
     if (!text || /^[_\s.]+$/.test(text) || NOISE_LINE.test(text)) continue;
