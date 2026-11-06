@@ -1048,14 +1048,14 @@ async function loadDocxImage(zip, target) {
   const entry = zip.file(path.replace(/\/[^/]+\/\.\.\//g, '/'));
   if (!entry) return null;
   const extension = target.split('.').pop().toLowerCase();
-  if (extension === 'png' || extension === 'jpg' || extension === 'jpeg') {
-    const mime = extension === 'png' ? 'image/png' : 'image/jpeg';
-    return `data:${mime};base64,${await entry.async('base64')}`;
-  }
   try {
-    // GIF、BMP 等转成 PNG；EMF、WMF 浏览器无法解码，会走到 catch。
+    // 先解码确认图片可用，损坏的文件和 EMF、WMF 都会走到 catch。
     const bitmap = await createImageBitmap(await entry.async('blob'));
-    const canvas = document.createElement('canvas');
+    if (extension === 'png' || extension === 'jpg' || extension === 'jpeg') {
+      const mime = extension === 'png' ? 'image/png' : 'image/jpeg';
+      return `data:${mime};base64,${await entry.async('base64')}`; // 保留原始文件，不重新压缩。
+    }
+    const canvas = document.createElement('canvas'); // GIF、BMP、WebP 统一转成 PNG。
     canvas.width = bitmap.width;
     canvas.height = bitmap.height;
     canvas.getContext('2d').drawImage(bitmap, 0, 0);
@@ -1973,9 +1973,10 @@ async function saveUploadedFigure() {
   const file = $('figUpload').files[0];
   if (!file) return;
   try {
+    await createImageBitmap(file); // 拦下损坏的文件和浏览器不支持的格式。
     saveFigure({ page: 0, box: null, image: await readDataUrl(file) });
   } catch (e) {
-    showAlert($('warning'), '无法读取图片', e.message);
+    showAlert($('warning'), '无法读取图片', '这个文件已损坏或格式不受支持，请换成 PNG 或 JPG。');
   }
 }
 
