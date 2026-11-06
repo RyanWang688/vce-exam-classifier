@@ -166,6 +166,10 @@
   .confirm { display: flex; align-items: center; gap: 6px; padding: 6px 2px; cursor: pointer; font-weight: 600; white-space: nowrap; }
   .confirm input { width: 16px; height: 16px; accent-color: var(--ok); }
   .orig { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .review-note { margin-top: 6px; font-size: 12px; color: var(--muted); white-space: pre-line; overflow-wrap: anywhere; }
+  .card.low .review-note { color: var(--warn); }
+  .only-review { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .cards.review-only .card:not(.low):not(.off) { display: none; }
 
   .source-form { display: grid; grid-template-columns: 1fr 2fr 100px 1fr; gap: 12px; }
   .source-form label.field { margin: 0; min-width: 0; }
@@ -316,14 +320,15 @@
         <hr>
         <dl class="kv stats">
           <div><dt>题目数</dt><dd id="sTotal"></dd></div>
-          <div><dt>待重点检查</dt><dd id="sLow"></dd></div>
+          <div><dt>待复核</dt><dd id="sLow"></dd></div>
           <div><dt>已确认</dt><dd id="sDone"></dd></div>
           <div><dt>人工修改</dt><dd id="sEdit"></dd></div>
           <div><dt>已确认题 AI 准确率</dt><dd id="sAcc"></dd></div>
           <div><dt>已截图</dt><dd id="sFig"></dd></div>
         </dl>
         <div class="toolbar">
-          <span class="hint">置信度低于 0.7 或知识点不在分类表中的题目会高亮。自动截图可能裁错，请逐张检查。</span>
+          <label class="only-review"><input id="onlyReview" type="checkbox"> 只看需要复核的题</label>
+          <span class="hint">知识点不明确、跨知识点或读不准的题会高亮。自动截图可能裁错，请逐张检查。</span>
           <div class="row">
             <button id="relocate" type="button" hidden>重新定位图片</button>
             <button id="exportJson" type="button">导出 JSON</button>
@@ -494,6 +499,7 @@ const DEFAULT_TAXONOMY = {
   ] },
 };
 
+const TOPIC_FITS = ['clear', 'split', 'poor'];
 const nullable = (type) => ({ type, nullable: true });
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
@@ -518,9 +524,9 @@ const RESPONSE_SCHEMA = {
       items: {
         type: 'OBJECT',
         propertyOrdering: ['question_number', 'page', 'adapted_from', 'section', 'text', 'sub_parts', 'figures', 'marks',
-          'topic', 'question_type', 'difficulty', 'confidence'],
+          'topic', 'topic_fit', 'alternative_topics', 'reason', 'question_type', 'difficulty', 'confidence'],
         required: ['question_number', 'page', 'adapted_from', 'section', 'text', 'sub_parts', 'figures', 'marks',
-          'topic', 'question_type', 'difficulty', 'confidence'],
+          'topic', 'topic_fit', 'alternative_topics', 'reason', 'question_type', 'difficulty', 'confidence'],
         properties: {
           question_number: { type: 'STRING' },
           page: nullable('INTEGER'),
@@ -556,6 +562,9 @@ const RESPONSE_SCHEMA = {
           },
           marks: nullable('NUMBER'),
           topic: { type: 'STRING' },
+          topic_fit: { type: 'STRING', enum: TOPIC_FITS },
+          alternative_topics: { type: 'ARRAY', items: { type: 'STRING' } },
+          reason: { type: 'STRING' },
           question_type: { type: 'STRING', enum: QUESTION_TYPES.map((t) => t[0]) },
           difficulty: { type: 'STRING', enum: DIFFICULTIES.map((d) => d[0]) },
           confidence: { type: 'NUMBER' },
@@ -637,11 +646,14 @@ function buildPrompt(taxonomy, kind = 'pdf') {
     '- marks: the marks shown; for a question with parts, the total. Use null if none are shown.',
     '- question_type: "multiple choice", "short answer" or "extended response".',
     '- difficulty: "easy", "medium" or "hard", judged for a VCE student at that level.',
-    '- confidence: 0 to 1, how sure you are of the topic classification. Use below 0.7 when the question spans several topics, or the scan is hard to read.',
+    '- confidence: 0 to 1, how sure you are that you read the question correctly. Use below 0.7 when the page is hard to read.',
     '',
     'TOPIC RULES',
     '- topic must be copied exactly, character for character, from the list for this subject in the taxonomy below.',
     '- If several topics apply, choose the main one. If the question truly belongs to none of them, use "Other". Never invent a topic.',
+    '- topic_fit: judge this strictly from what the marks test. "clear" if one taxonomy topic covers at least two thirds of the marks. "split" if more than one third of the marks test a different taxonomy topic. "poor" if no taxonomy topic really describes the skill being tested, even if you chose the closest one.',
+    '- alternative_topics: the other taxonomy topics this question tests, copied exactly, most relevant first, at most two. Use an empty array when topic_fit is "clear", unless "poor" has a next closest topic.',
+    '- reason: one short sentence naming the skill that decided the topic.',
     '',
     'TAXONOMY',
     JSON.stringify(taxonomy),
@@ -793,7 +805,7 @@ function explainApiError(status, body, rawText) {
     return new UserError('当前地区或账号不可用', '免费层可能未对你所在的地区开放。请检查 AI Studio 中的账号状态。', raw);
   }
   if (status >= 500) {
-    const error = new UserError(`Gemini 服务暂时不可用（${status}）`, '已自动重试仍未成功，请稍后再试。试卷很长时可以拆分后再试。', raw);
+    const error = new UserError(`Gemini 服务暂时不可用（${status}）`, '已自动重试仍未成功。这通常是 Gemini 高峰拥堵，请过几分钟再试，或在左侧换一个模型。', raw);
     error.serverBusy = true;
     return error;
   }
@@ -1478,6 +1490,12 @@ function prepareQuestions(raw, taxonomy, subject) {
       figures: prepareFigures(q.figures, questionIndex),
       marks: q.marks == null ? null : q.marks,
       topic,
+      // 模型没给出匹配度时按需要复核处理，宁可多看一题。
+      topic_fit: TOPIC_FITS.includes(q.topic_fit) ? q.topic_fit : 'split',
+      alternative_topics: (Array.isArray(q.alternative_topics) ? q.alternative_topics : [])
+        .map((t) => normalizeTopic(t, allowed))
+        .filter((t) => t !== topic && allowed.includes(t)),
+      reason: String(q.reason || ''),
       question_type: q.question_type,
       difficulty: q.difficulty,
       confidence,
@@ -1489,6 +1507,20 @@ function prepareQuestions(raw, taxonomy, subject) {
 
 const isTopicKnown = (q) => q.topic === OTHER_TOPIC || topicsForSubject(state.taxonomy, state.paper.subject).includes(q.topic);
 const isEdited = (q) => ['topic', 'question_type', 'difficulty'].some((f) => q[f] !== q.ai[f]);
+
+// 复核由规则决定：模型自评分数几乎总是很高，不能单独作为依据。
+function reviewReasons(q) {
+  const reasons = [];
+  const alternatives = q.alternative_topics.join('、');
+  if (!isTopicKnown(q)) reasons.push('知识点不在分类表中');
+  if (q.ai.topic === OTHER_TOPIC) reasons.push('AI 判定不属于分类表');
+  if (q.topic_fit === 'poor') reasons.push(`分类表没有合适的知识点${alternatives ? `，接近的还有 ${alternatives}` : ''}`);
+  if (q.topic_fit === 'split') reasons.push(`同时涉及其他知识点${alternatives ? `：${alternatives}` : ''}`);
+  if (q.confidence < LOW_CONFIDENCE) reasons.push('题目内容可能没读准');
+  return reasons;
+}
+
+const needsReview = (q) => !q.confirmed && reviewReasons(q).length > 0;
 
 /* ---------- 渲染 ---------- */
 function renderPaper() {
@@ -1544,7 +1576,7 @@ function renderStats() {
   const done = qs.filter((q) => q.confirmed);
   const correct = done.filter((q) => !isEdited(q));
   $('sTotal').textContent = qs.length;
-  $('sLow').textContent = qs.filter((q) => q.confidence < LOW_CONFIDENCE || !isTopicKnown(q)).length;
+  $('sLow').textContent = qs.filter(needsReview).length;
   $('sDone').textContent = `${done.length} / ${qs.length}`;
   $('sEdit').textContent = qs.filter(isEdited).length;
   $('sAcc').textContent = done.length ? `${Math.round(correct.length / done.length * 100)}%` : '-';
@@ -1592,14 +1624,21 @@ function topicOptions(q) {
 }
 
 function refreshCard(card, q, flags) {
-  const low = q.confidence < LOW_CONFIDENCE;
   const known = isTopicKnown(q);
-  card.classList.toggle('low', low);
+  const reasons = reviewReasons(q);
+  const flagged = needsReview(q);
+  card.classList.toggle('low', flagged);
   card.classList.toggle('off', !known);
   card.classList.toggle('done', q.confirmed);
   flags.textContent = '';
-  if (low) flags.append(el('span', 'tag lowc', '低置信度，请重点检查'));
+  if (flagged) flags.append(el('span', 'tag lowc', '需要复核'));
   if (!known) flags.append(el('span', 'tag offt', '知识点不在分类表中'));
+
+  const note = card.querySelector('.review-note');
+  const lines = [];
+  if (reasons.length) lines.push(`复核原因：${reasons.join('；')}`);
+  if (q.reason) lines.push(`AI 依据：${q.reason}`);
+  note.textContent = lines.join('\n');
   if (q.figures.some((f) => f.status === 'missing')) flags.append(el('span', 'tag lowc', '有图片未定位'));
   if (isEdited(q)) flags.append(el('span', 'tag edit', '已修改'));
 
@@ -1716,7 +1755,7 @@ function renderCard(q) {
     fieldWrap('难度', makeSelect(DIFFICULTIES.map(([v, l]) => [v, l]), q.difficulty, update('difficulty'), `第 ${q.question_number} 题难度`)),
     confirm,
   );
-  card.append(controls, el('div', 'orig'));
+  card.append(controls, el('div', 'review-note'), el('div', 'orig'));
 
   q.refresh = () => {
     refreshCard(card, q, flags);
@@ -2140,6 +2179,10 @@ function exportRows(embed = true) {
     figures: exportFigures(q, embed),
     marks: q.marks,
     topic: q.topic,
+    topic_fit: q.topic_fit,
+    alternative_topics: q.alternative_topics,
+    reason: q.reason,
+    review_reasons: reviewReasons(q),
     question_type: q.question_type,
     difficulty: q.difficulty,
     confidence: q.confidence,
@@ -2194,7 +2237,8 @@ function buildCsv() {
   const header = ['source_id', 'source', 'publisher', 'paper_title', 'subject', 'unit', 'paper_type', 'year',
     'source_page', 'adapted_from', 'source_file', 'file_sha256',
     'question_number', 'section', 'text', 'sub_parts', 'figures', 'marks',
-    'topic', 'question_type', 'difficulty', 'confidence', 'confirmed', 'edited',
+    'topic', 'topic_fit', 'alternative_topics', 'review_reasons', 'reason',
+    'question_type', 'difficulty', 'confidence', 'confirmed', 'edited',
     'ai_topic', 'ai_question_type', 'ai_difficulty'];
   const p = state.paper;
   const rows = exportRows(false).map((q) => [
@@ -2203,7 +2247,8 @@ function buildCsv() {
     q.question_number, q.section, q.text,
     q.sub_parts.map((s) => `(${s.label}) ${s.text}${s.marks == null ? '' : ` [${s.marks}]`}`).join('\n'),
     q.figures.map((f) => f.file || `未截图：第 ${f.page} 页`).join('; '),
-    q.marks, q.topic, q.question_type, q.difficulty, q.confidence, q.confirmed, q.edited,
+    q.marks, q.topic, q.topic_fit, q.alternative_topics.join('; '), q.review_reasons.join('; '), q.reason,
+    q.question_type, q.difficulty, q.confidence, q.confirmed, q.edited,
     q.ai_original.topic, q.ai_original.question_type, q.ai_original.difficulty,
   ]);
   return [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
@@ -2271,6 +2316,7 @@ function init() {
   $('priceOut').addEventListener('input', renderCost);
   $('exportJson').addEventListener('click', exportJson);
   $('exportCsv').addEventListener('click', exportCsv);
+  $('onlyReview').addEventListener('change', (e) => $('cards').classList.toggle('review-only', e.target.checked));
   $('exportZip').addEventListener('click', exportZip);
   initCropper();
 }

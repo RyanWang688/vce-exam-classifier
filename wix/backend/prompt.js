@@ -1,6 +1,7 @@
 // Gemini 的提示词和 responseSchema：与 index.html 保持一致。
 export const QUESTION_TYPES = ['multiple choice', 'short answer', 'extended response'];
 export const DIFFICULTIES = ['easy', 'medium', 'hard'];
+export const TOPIC_FITS = ['clear', 'split', 'poor'];
 
 const nullable = (type) => ({ type, nullable: true });
 export const RESPONSE_SCHEMA = {
@@ -26,9 +27,9 @@ export const RESPONSE_SCHEMA = {
       items: {
         type: 'OBJECT',
         propertyOrdering: ['question_number', 'page', 'adapted_from', 'section', 'text', 'sub_parts', 'figures', 'marks',
-          'topic', 'question_type', 'difficulty', 'confidence'],
+          'topic', 'topic_fit', 'alternative_topics', 'reason', 'question_type', 'difficulty', 'confidence'],
         required: ['question_number', 'page', 'adapted_from', 'section', 'text', 'sub_parts', 'figures', 'marks',
-          'topic', 'question_type', 'difficulty', 'confidence'],
+          'topic', 'topic_fit', 'alternative_topics', 'reason', 'question_type', 'difficulty', 'confidence'],
         properties: {
           question_number: { type: 'STRING' },
           page: nullable('INTEGER'),
@@ -64,6 +65,9 @@ export const RESPONSE_SCHEMA = {
           },
           marks: nullable('NUMBER'),
           topic: { type: 'STRING' },
+          topic_fit: { type: 'STRING', enum: TOPIC_FITS },
+          alternative_topics: { type: 'ARRAY', items: { type: 'STRING' } },
+          reason: { type: 'STRING' },
           question_type: { type: 'STRING', enum: QUESTION_TYPES },
           difficulty: { type: 'STRING', enum: DIFFICULTIES },
           confidence: { type: 'NUMBER' },
@@ -104,11 +108,14 @@ export function buildPrompt(taxonomy, kind = 'pdf') {
     '- marks: the marks shown; for a question with parts, the total. Use null if none are shown.',
     '- question_type: "multiple choice", "short answer" or "extended response".',
     '- difficulty: "easy", "medium" or "hard", judged for a VCE student at that level.',
-    '- confidence: 0 to 1, how sure you are of the topic classification. Use below 0.7 when the question spans several topics, or the scan is hard to read.',
+    '- confidence: 0 to 1, how sure you are that you read the question correctly. Use below 0.7 when the page is hard to read.',
     '',
     'TOPIC RULES',
     '- topic must be copied exactly, character for character, from the list for this subject in the taxonomy below.',
     '- If several topics apply, choose the main one. If the question truly belongs to none of them, use "Other". Never invent a topic.',
+    '- topic_fit: judge this strictly from what the marks test. "clear" if one taxonomy topic covers at least two thirds of the marks. "split" if more than one third of the marks test a different taxonomy topic. "poor" if no taxonomy topic really describes the skill being tested, even if you chose the closest one.',
+    '- alternative_topics: the other taxonomy topics this question tests, copied exactly, most relevant first, at most two. Use an empty array when topic_fit is "clear", unless "poor" has a next closest topic.',
+    '- reason: one short sentence naming the skill that decided the topic.',
     '',
     'TAXONOMY',
     JSON.stringify(taxonomy),

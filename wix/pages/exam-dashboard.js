@@ -64,7 +64,9 @@ function bindRepeater() {
     $item('#qNumber').text = `第 ${item.question_number} 题`;
     $item('#qText').text = [item.text, ...(item.sub_parts || []).map((p) => `(${p.label}) ${p.text}`)].join('\n');
     $item('#qConfidence').text = `置信度 ${Number(item.confidence).toFixed(2)}`;
-    $item('#card').style.backgroundColor = item.confidence < LOW_CONFIDENCE ? LOW_COLOR : NORMAL_COLOR;
+    // 模型自评分数几乎总是很高，复核要看 topic_fit。
+    const review = item.topic_fit !== 'clear' || item.confidence < LOW_CONFIDENCE;
+    $item('#card').style.backgroundColor = review ? LOW_COLOR : NORMAL_COLOR;
 
     const known = topicOptions(paper.subject);
     $item('#topicDropdown').options = known.some((o) => o.value === item.topic)
