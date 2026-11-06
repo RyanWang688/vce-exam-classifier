@@ -246,6 +246,8 @@
         <span id="dropText"></span>
       </label>
       <input id="figUpload" type="file" accept="image/*" hidden>
+      <label class="only-review" style="margin-bottom:4px"><input id="autoFigures" type="checkbox" checked> 自动截图配图</label>
+      <p class="hint" style="margin-bottom:10px">PDF 和图片每个含图页面多用 1 次请求。关闭后每份只用 1 次，配图可稍后再定位。Word 不受影响。</p>
       <button id="analyze" class="primary block" type="button" disabled>开始分析</button>
     </section>
 
@@ -374,7 +376,7 @@ const DROP_HINT = '点击选择或拖入 PDF、Word（.docx）或图片。多页
 const LOW_CONFIDENCE = 0.7;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
-const STORE = { key: 'vceDemo.apiKey', model: 'vceDemo.model', taxonomy: 'vceDemo.taxonomy' };
+const STORE = { key: 'vceDemo.apiKey', model: 'vceDemo.model', taxonomy: 'vceDemo.taxonomy', autoFigures: 'vceDemo.autoFigures' };
 
 const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 const PAGE_LONG_SIDE_PX = 2200;     // 截图清晰度：A4 长边约 190 DPI。
@@ -383,6 +385,13 @@ const FIGURE_PAGES_PER_REQUEST = 1;
 const LOCATE_TIMEOUT_MS = 15 * 60 * 1000;
 const FIGURE_PADDING = 12;          // 四周外扩（千分比），避免切到坐标轴和标注。
 const MIN_BOX_SIZE = 8;             // 小于这个尺寸（千分比）的框视为无效。
+const INK_LONG_SIDE_PX = 1100;      // 本地修正边界时使用的分辨率。
+const INK_GAP_PX = 5;               // 超过这段空白，就认为配图到此为止；比行距小，避免并入文字。
+const INK_MAX_PASSES = 40;
+const BODY_LINE_MIN_LETTERS = 30;   // 字母数达到这个值的文字行算正文，轴标题较短不受影响。
+const SHORT_LINE_MIN_LETTERS = 6;   // 从左边距开始的短句（如选项）算正文的最低字母数。
+const SCAN_MAX_TEXT_LINES = 3;      // 文字行不超过这个数时当作扫描页，不做修正。
+const SIBLING_INSET = 15;           // 隔离同页其他配图时内缩（千分比），容忍两框略有重叠。
 const MAX_RETRY_WAIT_S = 60;
 const SERVER_RETRY_DELAYS_S = [5, 15]; // 503 等服务端错误通常是短暂的，最多重试两次。
 const PAGE_CACHE_SIZE = 8;
@@ -791,6 +800,7 @@ const state = {
   sourceKind: 'pdf', // 'pdf'、'docx' 或 'images'
   docxImages: new Map(),
   docxNote: '',
+  figuresSkipped: false, // 用户关闭了自动截图，配图还没尝试定位。
   pdf: null,
   startedAt: 0,
 };
@@ -1361,6 +1371,163 @@ function cropImage(canvas, box) {
   return output.toDataURL('image/png');
 }
 
+/* ---------- 本地修正截图边界（不调用模型） ---------- */
+// 找出页面上的正文行：去掉它们后，剩下的墨迹基本就是配图。
+async function bodyTextRects(pageNumber, width, height) {
+  const page = await (await ensurePdf()).getPage(pageNumber);
+  const viewport = page.getViewport({ scale: 1 });
+  const rows = new Map();
+  (await page.getTextContent()).items.forEach((item) => {
+    if (!item.str.trim()) return;
+    const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+    const key = Math.round(y / 3);
+    rows.set(key, [...(rows.get(key) || []), { x, y, item }]);
+  });
+  // 同一水平线上相距很远的文字不算一行，比如流程图两端的 start 和 finish。
+  const maxGap = viewport.width * 0.04;
+  const all = [];
+  rows.forEach((cells) => {
+    let line = null;
+    cells.sort((a, b) => a.x - b.x).forEach(({ x, y, item }) => {
+      if (!line || x - line.right > maxGap) {
+        line = { text: '', left: x, right: x, top: y, bottom: y };
+        all.push(line);
+      }
+      line.text += item.str;
+      line.right = Math.max(line.right, x + item.width);
+      line.top = Math.min(line.top, y - item.height);
+      line.bottom = Math.max(line.bottom, y + item.height * 0.3);
+    });
+  });
+  const scaleX = width / viewport.width;
+  const scaleY = height / viewport.height;
+  const margin = Math.min(...all.map((line) => line.left));
+  const letters = (line) => (line.text.match(/[a-z]/gi) || []).length;
+  // 正文是长句，或从左边距开始的短句；图上的刻度和轴标题不符合这两点，要保留。
+  const isBody = (line) => letters(line) >= BODY_LINE_MIN_LETTERS ||
+    (letters(line) >= SHORT_LINE_MIN_LETTERS && line.left - margin < viewport.width * 0.03);
+  const rects = all.filter(isBody).map((line) => ({
+    left: Math.floor(line.left * scaleX) - 2,
+    right: Math.ceil(line.right * scaleX) + 2,
+    top: Math.floor(line.top * scaleY) - 2,
+    bottom: Math.ceil(line.bottom * scaleY) + 2,
+  }));
+  return { rects, lineCount: all.length };
+}
+
+function buildInkMap(canvas, rects) {
+  const scale = INK_LONG_SIDE_PX / Math.max(canvas.width, canvas.height);
+  const width = Math.round(canvas.width * scale);
+  const height = Math.round(canvas.height * scale);
+  const small = document.createElement('canvas');
+  small.width = width;
+  small.height = height;
+  const context = small.getContext('2d', { willReadFrequently: true });
+  context.drawImage(canvas, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const ink = new Uint8Array(width * height);
+  for (let i = 0; i < ink.length; i++) {
+    const luminance = pixels[i * 4] * 0.3 + pixels[i * 4 + 1] * 0.59 + pixels[i * 4 + 2] * 0.11;
+    if (luminance < 190) ink[i] = 1;
+  }
+  rects.forEach((rect) => {
+    for (let y = Math.max(0, rect.top); y < Math.min(height, rect.bottom); y++) {
+      ink.fill(0, y * width + Math.max(0, rect.left), y * width + Math.min(width, rect.right));
+    }
+  });
+  // 去掉页面两侧的色条和答题横线。
+  for (let y = 0; y < height; y++) {
+    ink.fill(0, y * width, y * width + Math.round(width * 0.075));
+    ink.fill(0, y * width + Math.round(width * 0.925), (y + 1) * width);
+    let longest = 0;
+    let run = 0;
+    for (let x = 0; x < width; x++) {
+      run = ink[y * width + x] ? run + 1 : 0;
+      longest = Math.max(longest, run);
+    }
+    const above = y > 1 ? ink.subarray((y - 2) * width, (y - 1) * width).reduce((a, b) => a + b, 0) : 0;
+    if (longest > width * 0.6 && above < width * 0.1) ink.fill(0, y * width, (y + 1) * width);
+  }
+  return { ink, width, height };
+}
+
+// 按墨迹把框收紧，再把被切断的内容补回来，遇到一段空白就停。
+function fitBoxToInk({ ink, width, height }, box) {
+  let top = Math.round(box[0] / 1000 * height);
+  let left = Math.round(box[1] / 1000 * width);
+  let bottom = Math.round(box[2] / 1000 * height);
+  let right = Math.round(box[3] / 1000 * width);
+  const rowHasInk = (y) => {
+    if (y < 0 || y >= height) return false;
+    for (let x = left; x < right; x++) if (ink[y * width + x]) return true;
+    return false;
+  };
+  const colHasInk = (x) => {
+    if (x < 0 || x >= width) return false;
+    for (let y = top; y < bottom; y++) if (ink[y * width + x]) return true;
+    return false;
+  };
+  const trim = () => {
+    while (top < bottom && !rowHasInk(top)) top++;
+    while (bottom > top && !rowHasInk(bottom - 1)) bottom--;
+    while (left < right && !colHasInk(left)) left++;
+    while (right > left && !colHasInk(right - 1)) right--;
+  };
+  // 向外找 gap 行/列以内是否还有墨迹，返回最远的位置。
+  const reach = (start, step, hasInk) => {
+    let last = start;
+    for (let d = 1; d <= INK_GAP_PX; d++) {
+      if (hasInk(start + step * d)) last = start + step * d;
+    }
+    return last;
+  };
+
+  trim();
+  if (right <= left || bottom <= top) return null;
+  for (let pass = 0, changed = true; changed && pass < INK_MAX_PASSES; pass++) {
+    const before = [top, left, bottom, right].join();
+    top = reach(top, -1, rowHasInk);
+    bottom = reach(bottom - 1, 1, rowHasInk) + 1;
+    left = reach(left, -1, colHasInk);
+    right = reach(right - 1, 1, colHasInk) + 1;
+    changed = before !== [top, left, bottom, right].join();
+  }
+  const pad = FIGURE_PADDING; // 留边要盖住和图隔着一小段空白的标注，比如坐标刻度。
+  return [
+    Math.max(0, top / height * 1000 - pad), Math.max(0, left / width * 1000 - pad),
+    Math.min(1000, bottom / height * 1000 + pad), Math.min(1000, right / width * 1000 + pad),
+  ].map(Math.round);
+}
+
+function siblingRects(siblings, width, height) {
+  return siblings.map(([ymin, xmin, ymax, xmax]) => ({
+    top: Math.round((ymin + SIBLING_INSET) / 1000 * height),
+    left: Math.round((xmin + SIBLING_INSET) / 1000 * width),
+    bottom: Math.round((ymax - SIBLING_INSET) / 1000 * height),
+    right: Math.round((xmax - SIBLING_INSET) / 1000 * width),
+  }));
+}
+
+// 只处理有文字层的 PDF；结果可疑时保留模型给的框。siblings 是同页其他配图的框。
+async function refineFigureBox(pageNumber, box, siblings = []) {
+  if (state.sourceKind !== 'pdf') return box;
+  try {
+    const canvas = await getPageCanvas(pageNumber);
+    const scale = INK_LONG_SIDE_PX / Math.max(canvas.width, canvas.height);
+    const width = Math.round(canvas.width * scale);
+    const height = Math.round(canvas.height * scale);
+    const { rects, lineCount } = await bodyTextRects(pageNumber, width, height);
+    if (lineCount <= SCAN_MAX_TEXT_LINES) return box;
+    const fitted = fitBoxToInk(buildInkMap(canvas, [...rects, ...siblingRects(siblings, width, height)]), box);
+    if (!fitted) return box;
+    const area = (b) => (b[2] - b[0]) * (b[3] - b[1]);
+    const ratio = area(fitted) / area(box);
+    return ratio >= 0.4 && ratio <= 3 ? fitted : box;
+  } catch (e) {
+    return box;
+  }
+}
+
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
     const onAbort = () => {
@@ -1429,9 +1596,17 @@ async function locateBatch(pages, entries, { apiKey, model, signal }) {
   renderUsage(mergeUsage(state.meta.usage, usage), performance.now() - state.startedAt);
 
   const located = Array.isArray(parsed.figures) ? parsed.figures : [];
-  for (const { q, figure } of entries) {
+  const placed = entries.filter(({ figure }) => {
     const item = located.find((f) => f.id === figure.id);
-    if (item && applyLocation(item, figure, pages)) {
+    return item && applyLocation(item, figure, pages);
+  });
+  const modelBoxes = new Map(placed.map(({ figure }) => [figure, figure.box]));
+  for (const { q, figure } of entries) {
+    if (modelBoxes.has(figure)) {
+      const siblings = placed
+        .filter((other) => other.figure !== figure && other.figure.page === figure.page)
+        .map((other) => modelBoxes.get(other.figure));
+      figure.box = await refineFigureBox(figure.page, figure.box, siblings);
       figure.image = cropImage(await getPageCanvas(figure.page), figure.box);
       figure.status = 'ok';
     } else {
@@ -1706,7 +1881,7 @@ function refreshCard(card, q, flags) {
   if (reasons.length) lines.push(`复核原因：${reasons.join('；')}`);
   if (q.reason) lines.push(`AI 依据：${q.reason}`);
   note.textContent = lines.join('\n');
-  if (q.figures.some((f) => f.status === 'missing')) flags.append(el('span', 'tag lowc', '有图片未定位'));
+  if (q.figures.some((f) => f.status === 'missing')) flags.append(el('span', 'tag', state.figuresSkipped ? '配图未截取' : '有图片未定位'));
   if (isEdited(q)) flags.append(el('span', 'tag edit', '已修改'));
 
   const orig = card.querySelector('.orig');
@@ -1740,7 +1915,8 @@ function renderFigure(q, figure) {
     box.append(image);
   } else {
     const docx = state.sourceKind === 'docx';
-    box.append(el('div', '', figure.status === 'pending' ? '图片定位中…' : (docx ? '未能读取这张图片，请手动上传' : '未能自动定位，请手动框选')));
+    const missingText = state.figuresSkipped ? '尚未截图，可点“重新定位图片”或手动框选' : '未能自动定位，请手动框选';
+    box.append(el('div', '', figure.status === 'pending' ? '图片定位中…' : (docx ? '未能读取这张图片，请手动上传' : missingText)));
   }
   box.append(el('figcaption', 'fig-cap', figureCaption(figure)));
   if (figure.status !== 'pending') {
@@ -1992,6 +2168,7 @@ async function relocateFigures() {
     return;
   }
 
+  state.figuresSkipped = false;
   allFigures().forEach(({ q, figure }) => {
     if (figure.status !== 'missing') return;
     figure.status = 'pending';
@@ -2036,6 +2213,7 @@ async function analyze() {
   state.sourceKind = fileKind(state.file);
   state.docxImages = new Map();
   state.docxNote = '';
+  state.figuresSkipped = state.sourceKind !== 'docx' && !$('autoFigures').checked;
   if (state.pdf) state.pdf.destroy();
   state.pdf = null;
   pageCache.clear();
@@ -2076,8 +2254,12 @@ async function analyze() {
     if (state.docxNote) showAlert($('warning'), 'Word 文档有部分内容读不到', state.docxNote);
 
     // 分类结果先展示出来，再单独计时定位图片；定位失败不影响已有结果。
-    task.resetTimeout(LOCATE_TIMEOUT_MS);
-    await locateFigures({ apiKey, model, signal: task.signal });
+    if (state.figuresSkipped) {
+      markPendingMissing();
+    } else {
+      task.resetTimeout(LOCATE_TIMEOUT_MS);
+      await locateFigures({ apiKey, model, signal: task.signal });
+    }
   } catch (e) {
     const elapsed = performance.now() - started;
     if (classified) {
@@ -2332,6 +2514,8 @@ function init() {
   $('dropText').textContent = DROP_HINT;
   $('apiKey').value = storageGet(STORE.key) || '';
   $('model').value = storageGet(STORE.model) || DEFAULT_MODEL;
+  $('autoFigures').checked = storageGet(STORE.autoFigures) !== '0';
+  $('autoFigures').addEventListener('change', () => storageSet(STORE.autoFigures, $('autoFigures').checked ? '1' : '0'));
   $('taxonomy').value = storageGet(STORE.taxonomy) || JSON.stringify(DEFAULT_TAXONOMY, null, 2);
   fillPrices($('model').value);
   if (!$('priceIn').value) fillPrices(DEFAULT_MODEL);
