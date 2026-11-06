@@ -167,6 +167,10 @@
   .confirm input { width: 16px; height: 16px; accent-color: var(--ok); }
   .orig { margin-top: 6px; font-size: 12px; color: var(--muted); }
 
+  .source-form { display: grid; grid-template-columns: 1fr 2fr 100px 1fr; gap: 12px; }
+  .source-form label.field { margin: 0; min-width: 0; }
+  .source-line { margin-bottom: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+
   .figs { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; margin-top: 10px; }
   .fig { display: grid; gap: 6px; padding: 6px; max-width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
   .fig img { display: block; max-width: min(100%, 440px); max-height: 340px; }
@@ -299,6 +303,15 @@
           <div><dt>试卷类型</dt><dd id="pType"></dd></div>
           <div><dt>年份</dt><dd id="pYear"></dd></div>
         </dl>
+        <div>
+          <p class="hint" style="margin-bottom:6px">来源信息（可修改，应用到全部题目，决定题目 ID）</p>
+          <div class="source-form">
+            <label class="field"><span>出版方</span><input id="srcPublisher" type="text" spellcheck="false"></label>
+            <label class="field"><span>试卷名称</span><input id="srcTitle" type="text" spellcheck="false"></label>
+            <label class="field"><span>年份</span><input id="srcYear" type="number" min="1900" max="2100" step="1"></label>
+            <label class="field"><span>试卷类型</span><input id="srcType" type="text" spellcheck="false"></label>
+          </div>
+        </div>
         <hr>
         <dl class="kv stats">
           <div><dt>题目数</dt><dd id="sTotal"></dd></div>
@@ -311,6 +324,7 @@
         <div class="toolbar">
           <span class="hint">置信度低于 0.7 或知识点不在分类表中的题目会高亮。自动截图可能裁错，请逐张检查。</span>
           <div class="row">
+            <button id="relocate" type="button" hidden>重新定位图片</button>
             <button id="exportJson" type="button">导出 JSON</button>
             <button id="exportCsv" type="button">导出 CSV</button>
             <button id="exportZip" type="button">导出 ZIP（含图片）</button>
@@ -360,6 +374,7 @@ const FIGURE_PAGES_PER_REQUEST = 6; // 合并请求以节省频率额度，又�
 const FIGURE_PADDING = 12;          // 四周外扩（千分比），避免切到坐标轴和标注。
 const MIN_BOX_SIZE = 8;             // 小于这个尺寸（千分比）的框视为无效。
 const MAX_RETRY_WAIT_S = 60;
+const SERVER_RETRY_DELAYS_S = [5, 15]; // 503 等服务端错误通常是短暂的，最多重试两次。
 const PAGE_CACHE_SIZE = 8;
 
 // 单价来自 Google AI 官方价目页（2026-11-06）。3.6/3.8 Flash 自 2027-01-01 起涨到 1.50 / 7.50。
@@ -484,12 +499,14 @@ const RESPONSE_SCHEMA = {
   properties: {
     paper: {
       type: 'OBJECT',
-      propertyOrdering: ['subject', 'unit', 'paper_type', 'year'],
-      required: ['subject', 'unit', 'paper_type', 'year'],
+      propertyOrdering: ['subject', 'unit', 'paper_type', 'publisher', 'paper_title', 'year'],
+      required: ['subject', 'unit', 'paper_type', 'publisher', 'paper_title', 'year'],
       properties: {
         subject: { type: 'STRING' },
         unit: { type: 'STRING', enum: ['Unit 1/2', 'Unit 3/4', 'Unknown'] },
         paper_type: { type: 'STRING' },
+        publisher: { type: 'STRING' },
+        paper_title: { type: 'STRING' },
         year: nullable('INTEGER'),
       },
     },
@@ -497,12 +514,13 @@ const RESPONSE_SCHEMA = {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
-        propertyOrdering: ['question_number', 'section', 'text', 'sub_parts', 'figures', 'marks',
+        propertyOrdering: ['question_number', 'page', 'section', 'text', 'sub_parts', 'figures', 'marks',
           'topic', 'question_type', 'difficulty', 'confidence'],
-        required: ['question_number', 'section', 'text', 'sub_parts', 'figures', 'marks',
+        required: ['question_number', 'page', 'section', 'text', 'sub_parts', 'figures', 'marks',
           'topic', 'question_type', 'difficulty', 'confidence'],
         properties: {
           question_number: { type: 'STRING' },
+          page: nullable('INTEGER'),
           section: nullable('STRING'),
           text: { type: 'STRING' },
           sub_parts: {
@@ -592,11 +610,14 @@ function buildPrompt(taxonomy) {
     '- subject: the matching subject name from the taxonomy, or the subject as printed if none matches.',
     '- unit: "Unit 1/2", "Unit 3/4" or "Unknown".',
     '- paper_type: for example "VCAA Exam 1", "VCAA Exam 2", "SAC", "Practice exam".',
+    '- publisher: the organisation that wrote the paper, for example "VCAA", a school or a commercial exam company, otherwise "Unknown".',
+    '- paper_title: the name of the paper as printed, without the publisher or year, for example "Specialist Mathematics Mock SAC 1".',
     '- year: the year printed on the paper, otherwise null.',
     '',
     'QUESTIONS',
     '- Split the paper into individual questions, in paper order. Skip cover pages, instructions, formula sheets and data books. If solutions are included, do not treat them as questions and do not include them.',
     '- A question with parts (3a, 3b, 3c) stays one question: question_number "3", the shared stem in text, and each part in sub_parts with label "a", "b", "c". Use an empty sub_parts array for a question without parts.',
+    '- page: the page within this PDF file where the question starts, where the first page of the file is 1, otherwise null.',
     '- text: the question in its original English. Include all multiple choice options. Describe any diagram or graph briefly as [Diagram: ...].',
     '- figures: one entry for each diagram, graph, photo or chart needed to answer the question, and an empty array if there are none. page is the page position within this PDF file, where the first page of the file is 1, not the page number printed on the paper. description says briefly what the figure shows. sub_part is the label of the part it belongs to, or null if it belongs to the whole question. Treat figures for multiple choice options as one entry. Ignore logos and decorative images. Ordinary tables that can be written as text are not figures.',
     '- Write all mathematics in LaTeX, delimited by \\( \\) inline and \\[ \\] for display. Never use $ as a maths delimiter; $ means currency only.',
@@ -740,7 +761,9 @@ function explainApiError(status, body, rawText) {
     return new UserError('当前地区或账号不可用', '免费层可能未对你所在的地区开放。请检查 AI Studio 中的账号状态。', raw);
   }
   if (status >= 500) {
-    return new UserError(`Gemini 服务暂时不可用（${status}）`, '服务繁忙或处理超时，请稍后重试。试卷很长时可以拆分后再试。', raw);
+    const error = new UserError(`Gemini 服务暂时不可用（${status}）`, '已自动重试仍未成功，请稍后再试。试卷很长时可以拆分后再试。', raw);
+    error.serverBusy = true;
+    return error;
   }
   return new UserError(`请求失败（${status}）`, message || '接口返回了错误，请查看下方原始信息。', raw);
 }
@@ -793,7 +816,7 @@ function callGemini({ apiKey, model, base64, taxonomy, signal }) {
     { inlineData: { mimeType: 'application/pdf', data: base64 } },
     { text: buildPrompt(taxonomy) },
   ];
-  return postGemini({ apiKey, model, parts, schema: RESPONSE_SCHEMA, signal });
+  return postWithRetry({ apiKey, model, parts, schema: RESPONSE_SCHEMA, signal });
 }
 
 function readJson(data) {
@@ -909,14 +932,25 @@ function sleep(ms, signal) {
   });
 }
 
+// 返回需要等待的秒数；不该重试时返回 null。
+function retryWaitSeconds(error, attempt) {
+  if (error.serverBusy && attempt < SERVER_RETRY_DELAYS_S.length) return SERVER_RETRY_DELAYS_S[attempt];
+  if (error.retryAfter && error.retryAfter <= MAX_RETRY_WAIT_S && attempt === 0) return error.retryAfter + 1;
+  return null;
+}
+
 async function postWithRetry(options) {
-  try {
-    return await postGemini(options);
-  } catch (e) {
-    if (!e.retryAfter || e.retryAfter > MAX_RETRY_WAIT_S) throw e;
-    $('loaderText').textContent = `触发频率限制，等待 ${e.retryAfter} 秒后继续…`;
-    await sleep((e.retryAfter + 1) * 1000, options.signal);
-    return postGemini(options);
+  const label = $('loaderText').textContent;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await postGemini(options);
+    } catch (e) {
+      const wait = retryWaitSeconds(e, attempt);
+      if (wait === null) throw e;
+      $('loaderText').textContent = `Gemini 暂时繁忙，${wait} 秒后自动重试…`;
+      await sleep(wait * 1000, options.signal);
+      $('loaderText').textContent = label;
+    }
   }
 }
 
@@ -975,7 +1009,7 @@ function markPendingMissing() {
 }
 
 async function locateFigures(options) {
-  const entries = allFigures();
+  const entries = allFigures().filter(({ figure }) => figure.status === 'pending');
   if (!entries.length) return;
 
   try {
@@ -1047,6 +1081,7 @@ function prepareQuestions(raw, taxonomy, subject) {
     const confidence = Math.min(1, Math.max(0, Number(q.confidence) || 0));
     return {
       question_number: String(q.question_number == null ? '' : q.question_number),
+      page: Number.isInteger(q.page) ? q.page : null,
       section: q.section || null,
       text: String(q.text || ''),
       sub_parts: Array.isArray(q.sub_parts) ? q.sub_parts : [],
@@ -1072,6 +1107,46 @@ function renderPaper() {
   $('pUnit').textContent = p.unit || 'Unknown';
   $('pType').textContent = p.paper_type || '未识别';
   $('pYear').textContent = p.year == null ? '未识别' : p.year;
+  $('srcPublisher').value = p.publisher || '';
+  $('srcTitle').value = p.paper_title || '';
+  $('srcYear').value = p.year == null ? '' : p.year;
+  $('srcType').value = p.paper_type || '';
+}
+
+/* ---------- 来源 ---------- */
+const slug = (value) => String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+// 给人看的来源，例如 “2024 VCAA Physics Exam Section B Q3”。
+function sourceLabel(q) {
+  const p = state.paper;
+  const parts = [p.year, p.publisher, p.paper_title, q.section, `Q${q.question_number}`];
+  return parts.filter((part) => part !== null && part !== undefined && part !== '').join(' ');
+}
+
+// 数据库用的稳定 ID：含 section，因为不同 section 的题号会重复。
+function sourceId(q) {
+  const p = state.paper;
+  const parts = [p.publisher, p.year || 'unknown-year', p.paper_title, p.paper_type, q.section, `q${q.question_number}`];
+  return parts.map(slug).filter(Boolean).join('-');
+}
+
+function refreshSources() {
+  state.questions.forEach((q) => q.refresh());
+}
+
+function editPaper(field, value) {
+  state.paper[field] = value;
+  renderPaper();
+  refreshSources();
+}
+
+async function fileSha256(file) {
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    return null; // 部分环境没有 crypto.subtle，缺少哈希不影响使用。
+  }
 }
 
 function renderStats() {
@@ -1085,6 +1160,15 @@ function renderStats() {
   $('sAcc').textContent = done.length ? `${Math.round(correct.length / done.length * 100)}%` : '-';
   const figures = allFigures();
   $('sFig').textContent = `${figures.filter(({ figure }) => figure.image).length} / ${figures.length}`;
+  updateRelocateButton();
+}
+
+function updateRelocateButton() {
+  const missing = allFigures().filter(({ figure }) => figure.status === 'missing').length;
+  const button = $('relocate');
+  button.hidden = !missing;
+  button.disabled = state.busy;
+  button.textContent = `重新定位图片（${missing}）`;
 }
 
 function makeSelect(options, value, onChange, label) {
@@ -1196,7 +1280,8 @@ function renderCard(q) {
   if (q.section) head.append(el('span', 'tag', q.section));
   if (q.marks != null) head.append(el('span', 'tag', `${q.marks} 分`));
   head.append(flags, el('span', 'tag conf', `置信度 ${q.confidence.toFixed(2)}`));
-  card.append(head, el('div', 'qtext', q.text));
+  const sourceLine = el('div', 'source-line');
+  card.append(head, sourceLine, el('div', 'qtext', q.text));
 
   if (q.sub_parts.length) {
     const list = el('ol', 'parts');
@@ -1244,6 +1329,9 @@ function renderCard(q) {
   q.refresh = () => {
     refreshCard(card, q, flags);
     renderFigures(q, figureHost);
+    const page = q.page ? ` · PDF 第 ${q.page} 页` : '';
+    sourceLine.textContent = `来源：${sourceLabel(q)}${page}`;
+    sourceLine.title = `题目 ID：${sourceId(q)}`;
   };
   q.refresh();
   renderMath(card);
@@ -1339,6 +1427,74 @@ function setBusy(busy) {
   $('loader').hidden = !busy;
   $('empty').hidden = busy || state.questions.length > 0 || !$('result').hidden;
   updateButton();
+  updateRelocateButton();
+}
+
+// 启动一次可取消、带超时和计时显示的任务。
+function startTask() {
+  const controller = new AbortController();
+  state.abort = controller;
+  const started = performance.now();
+  $('elapsed').textContent = '0';
+  const tick = setInterval(() => {
+    $('elapsed').textContent = Math.floor((performance.now() - started) / 1000);
+  }, 1000);
+
+  const task = {
+    signal: controller.signal,
+    timedOut: false,
+    timer: null,
+    resetTimeout() {
+      clearTimeout(task.timer);
+      task.timer = setTimeout(() => {
+        task.timedOut = true;
+        controller.abort();
+      }, REQUEST_TIMEOUT_MS);
+    },
+    finish() {
+      clearTimeout(task.timer);
+      clearInterval(tick);
+      state.abort = null;
+      setBusy(false);
+    },
+  };
+  task.resetTimeout();
+  return task;
+}
+
+function showLocateWarning(error) {
+  const reason = error.name === 'AbortError' ? '已停止定位。' : `${error.title || '定位失败'}：${error.message}`;
+  showAlert($('warning'), '部分图片未能自动截图', `${reason} 分类结果已保留，可以点“重新定位图片”再试，或手动框选。`, error.raw);
+}
+
+async function relocateFigures() {
+  clearAlerts();
+  const apiKey = $('apiKey').value.trim();
+  const model = $('model').value.trim().replace(/^models\//, '');
+  if (!apiKey || !model) {
+    showAlert($('error'), '缺少配置', '请先在左侧填写 API Key 和模型 ID。');
+    return;
+  }
+
+  allFigures().forEach(({ q, figure }) => {
+    if (figure.status !== 'missing') return;
+    figure.status = 'pending';
+    q.refresh();
+  });
+  $('loaderText').textContent = '正在定位图片…';
+  setBusy(true);
+  renderStats();
+
+  // 累计耗时：接着上一次的处理耗时往下算。
+  state.startedAt = performance.now() - ((state.meta && state.meta.elapsed_ms) || 0);
+  const task = startTask();
+  try {
+    await locateFigures({ apiKey, model, signal: task.signal });
+  } catch (e) {
+    showLocateWarning(e);
+  } finally {
+    task.finish();
+  }
 }
 
 async function analyze() {
@@ -1368,40 +1524,36 @@ async function analyze() {
   $('loaderText').textContent = '正在分析试卷…';
   setBusy(true);
 
-  const controller = new AbortController();
-  state.abort = controller;
-  let timedOut = false;
-  let timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, REQUEST_TIMEOUT_MS);
+  const task = startTask();
   const started = performance.now();
   state.startedAt = started;
   let classified = false;
-  $('elapsed').textContent = '0';
-  const tick = setInterval(() => {
-    $('elapsed').textContent = Math.floor((performance.now() - started) / 1000);
-  }, 1000);
 
   try {
     const base64 = await readBase64(state.file);
-    const data = await callGemini({ apiKey, model, base64, taxonomy, signal: controller.signal });
+    const data = await callGemini({ apiKey, model, base64, taxonomy, signal: task.signal });
     const elapsed = performance.now() - started;
     const result = parseResult(data);
-    state.paper = result.paper;
+    state.paper = {
+      ...result.paper,
+      publisher: result.paper.publisher || 'Unknown',
+      paper_title: result.paper.paper_title || state.sourceFile.name.replace(/\.pdf$/i, ''),
+    };
+    state.meta.file_sha256 = await fileSha256(state.sourceFile);
     state.questions = prepareQuestions(result.questions, taxonomy, result.paper.subject);
     renderUsage(result.usage, elapsed);
     renderResult();
     classified = true;
 
     // 分类结果先展示出来，再单独计时定位图片；定位失败不影响已有结果。
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, REQUEST_TIMEOUT_MS);
-    await locateFigures({ apiKey, model, signal: controller.signal });
+    task.resetTimeout();
+    await locateFigures({ apiKey, model, signal: task.signal });
   } catch (e) {
     const elapsed = performance.now() - started;
     if (classified) {
-      const reason = e.name === 'AbortError' ? '已停止定位。' : `${e.title || '定位失败'}：${e.message}`;
-      showAlert($('warning'), '部分图片未能自动截图', `${reason} 分类结果已保留，未定位的图片可以手动框选。`, e.raw);
+      showLocateWarning(e);
     } else if (e.name === 'AbortError') {
-      if (timedOut) showAlert($('error'), '请求超时', '超过 5 分钟仍未返回。请拆分试卷或换一个更快的模型。');
+      if (task.timedOut) showAlert($('error'), '请求超时', '超过 5 分钟仍未返回。请拆分试卷或换一个更快的模型。');
       else showAlert($('warning'), '已取消', '本次分析已取消。');
     } else if (e instanceof UserError) {
       showAlert($('error'), e.title, e.message, e.raw);
@@ -1410,10 +1562,7 @@ async function analyze() {
       showAlert($('error'), '发生未知错误', e.message || String(e));
     }
   } finally {
-    clearTimeout(timeoutId);
-    clearInterval(tick);
-    state.abort = null;
-    setBusy(false);
+    task.finish();
   }
 }
 
@@ -1528,6 +1677,17 @@ function exportFigures(q, embed) {
 
 function exportRows(embed = true) {
   return state.questions.map((q) => ({
+    source_id: sourceId(q),
+    source: {
+      label: sourceLabel(q),
+      publisher: state.paper.publisher,
+      paper_title: state.paper.paper_title,
+      paper_type: state.paper.paper_type,
+      year: state.paper.year,
+      page: q.page,
+      file: state.meta.file,
+      file_sha256: state.meta.file_sha256,
+    },
     question_number: q.question_number,
     section: q.section,
     text: q.text,
@@ -1586,12 +1746,16 @@ function csvCell(value) {
 }
 
 function buildCsv() {
-  const header = ['subject', 'unit', 'paper_type', 'year', 'question_number', 'section', 'text', 'sub_parts', 'figures', 'marks',
+  const header = ['source_id', 'source', 'publisher', 'paper_title', 'subject', 'unit', 'paper_type', 'year',
+    'source_page', 'source_file', 'file_sha256',
+    'question_number', 'section', 'text', 'sub_parts', 'figures', 'marks',
     'topic', 'question_type', 'difficulty', 'confidence', 'confirmed', 'edited',
     'ai_topic', 'ai_question_type', 'ai_difficulty'];
   const p = state.paper;
   const rows = exportRows(false).map((q) => [
-    p.subject, p.unit, p.paper_type, p.year, q.question_number, q.section, q.text,
+    q.source_id, q.source.label, p.publisher, p.paper_title, p.subject, p.unit, p.paper_type, p.year,
+    q.source.page, q.source.file, q.source.file_sha256,
+    q.question_number, q.section, q.text,
     q.sub_parts.map((s) => `(${s.label}) ${s.text}${s.marks == null ? '' : ` [${s.marks}]`}`).join('\n'),
     q.figures.map((f) => f.file || `未截图：第 ${f.page} 页`).join('; '),
     q.marks, q.topic, q.question_type, q.difficulty, q.confidence, q.confirmed, q.edited,
@@ -1651,6 +1815,11 @@ function init() {
   drop.addEventListener('drop', (e) => setFile(e.dataTransfer.files[0]));
 
   $('analyze').addEventListener('click', analyze);
+  $('relocate').addEventListener('click', relocateFigures);
+  $('srcPublisher').addEventListener('change', (e) => editPaper('publisher', e.target.value.trim()));
+  $('srcTitle').addEventListener('change', (e) => editPaper('paper_title', e.target.value.trim()));
+  $('srcType').addEventListener('change', (e) => editPaper('paper_type', e.target.value.trim()));
+  $('srcYear').addEventListener('change', (e) => editPaper('year', e.target.value ? Number(e.target.value) : null));
   $('cancel').addEventListener('click', () => { if (state.abort) state.abort.abort(); });
   $('priceIn').addEventListener('input', renderCost);
   $('priceOut').addEventListener('input', renderCost);

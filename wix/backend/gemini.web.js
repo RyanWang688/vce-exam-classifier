@@ -128,6 +128,19 @@ function fullText(question) {
   return [question.text, ...parts].join('\n');
 }
 
+const slug = (value) => String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+// 算法与 index.html 的 sourceLabel / sourceId 相同，改动时要同步。
+function sourceLabel(paper, q) {
+  const parts = [paper.year, paper.publisher, paper.paper_title, q.section, `Q${q.question_number}`];
+  return parts.filter((part) => part !== null && part !== undefined && part !== '').join(' ');
+}
+
+function sourceId(paper, q) {
+  const parts = [paper.publisher, paper.year || 'unknown-year', paper.paper_title, paper.paper_type, q.section, `q${q.question_number}`];
+  return parts.map(slug).filter(Boolean).join('-');
+}
+
 /** 把管理员审核后的题目写入 CMS 集合 Questions。 */
 export const saveQuestions = webMethod(Permissions.Admin, async (paper, questions) => {
   const items = questions.map((q) => ({
@@ -138,6 +151,15 @@ export const saveQuestions = webMethod(Permissions.Admin, async (paper, question
     difficulty: q.difficulty,
     text: fullText(q),
     confirmed: Boolean(q.confirmed),
+    sourceId: sourceId(paper, q),
+    source: sourceLabel(paper, q),
+    publisher: paper.publisher,
+    paperTitle: paper.paper_title,
+    paperType: paper.paper_type,
+    year: paper.year,
+    questionNumber: q.question_number,
+    section: q.section,
+    sourcePage: q.page,
   }));
   const result = await wixData.bulkInsert(QUESTIONS, items, DATA_OPTIONS);
   return { inserted: result.inserted, errors: result.errors.length };

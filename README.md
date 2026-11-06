@@ -47,6 +47,20 @@ npx serve .
 
 截图来自试卷原件，公开使用前请确认版权许可。
 
+## 题目来源
+
+每道题都带来源，方便以后统一入库：
+
+| 字段 | 说明 |
+|---|---|
+| `source_id` | 题目唯一 ID，由出版方、年份、试卷名、类型、Section 和题号生成 |
+| `source.label` | 给人看的来源，如 `2024 VCAA Physics Written Examination Section B Q1` |
+| `source.publisher` / `paper_title` / `paper_type` / `year` | 可筛选的结构化字段 |
+| `source.page` | 题目在 PDF 里的起始页 |
+| `source.file` / `file_sha256` | 原文件名和文件指纹，用于追溯和识别重复文件 |
+
+AI 识别的来源可以在结果页修改，修改会应用到全部题目。修改会改变 `source_id`，请在入库前确认好。
+
 ## 默认模型
 
 默认使用 `gemini-3.6-flash`，页面上可以修改。核对日期为 2026-11-06：

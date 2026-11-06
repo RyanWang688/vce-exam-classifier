@@ -64,8 +64,19 @@ saveQuestions() ────────────▶ bulkInsert ────�
 | Difficulty | `difficulty` | Text |
 | Text | `text` | Text |
 | Confirmed | `confirmed` | Boolean |
+| Source ID | `sourceId` | Text（题目唯一 ID，用于去重） |
+| Source | `source` | Text（如 `2024 VCAA Physics Exam Section B Q3`） |
+| Publisher | `publisher` | Text |
+| Paper Title | `paperTitle` | Text |
+| Paper Type | `paperType` | Text |
+| Year | `year` | Number |
+| Question Number | `questionNumber` | Text |
+| Section | `section` | Text |
+| Source Page | `sourcePage` | Number |
 
-`Questions` 目前没有保存题号、试卷类型、年份和置信度。以后要按试卷筛选或复查时，建议增加这些字段，并同步修改 `saveQuestions`。
+`sourceId` 由出版方、年份、试卷名、类型、Section 和题号生成，同一道题重复导入时 ID 相同。`bulkInsert` 不会自动按它去重，正式入库前要先查询已有的 `sourceId`，或者把它的值同时写入 `_id`。
+
+本地页面可以修改来源信息；Wix 页面目前直接使用 AI 识别的值，迁移时建议加上同样的输入框。
 
 **ClassifyJobs**
 
