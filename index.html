@@ -378,7 +378,9 @@ const STORE = { key: 'vceDemo.apiKey', model: 'vceDemo.model', taxonomy: 'vceDem
 
 const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 const PAGE_LONG_SIDE_PX = 2200;     // 截图清晰度：A4 长边约 190 DPI。
-const FIGURE_PAGES_PER_REQUEST = 6; // 合并请求以节省频率额度，又不超过 20MB 的请求上限。
+// 实测每次只发一页时边界明显更准（见迭代记录第 11 轮），代价是请求次数变多。
+const FIGURE_PAGES_PER_REQUEST = 1;
+const LOCATE_TIMEOUT_MS = 15 * 60 * 1000;
 const FIGURE_PADDING = 12;          // 四周外扩（千分比），避免切到坐标轴和标注。
 const MIN_BOX_SIZE = 8;             // 小于这个尺寸（千分比）的框视为无效。
 const MAX_RETRY_WAIT_S = 60;
@@ -1458,12 +1460,19 @@ async function locateFigures(options) {
     const valid = entries.filter(({ figure }) => figure.page >= 1 && figure.page <= count);
     const pages = [...new Set(valid.map(({ figure }) => figure.page))].sort((a, b) => a - b);
     const total = Math.ceil(pages.length / FIGURE_PAGES_PER_REQUEST);
+    let busyError = null;
     for (let i = 0; i < total; i++) {
       const batchPages = pages.slice(i * FIGURE_PAGES_PER_REQUEST, (i + 1) * FIGURE_PAGES_PER_REQUEST);
       const batchEntries = valid.filter(({ figure }) => batchPages.includes(figure.page));
       $('loaderText').textContent = `正在定位图片（第 ${i + 1} / ${total} 批）…`;
-      await locateBatch(batchPages, batchEntries, options);
+      try {
+        await locateBatch(batchPages, batchEntries, options);
+      } catch (e) {
+        if (!e.serverBusy) throw e; // 额度用完等错误，后面的页也不会成功。
+        busyError = e; // 拥堵是暂时的，继续处理其他页。
+      }
     }
+    if (busyError) throw busyError;
   } finally {
     markPendingMissing(); // 无论成功与否都结束“定位中”状态，未完成的可手动框选。
   }
@@ -1951,12 +1960,12 @@ function startTask() {
     signal: controller.signal,
     timedOut: false,
     timer: null,
-    resetTimeout() {
+    resetTimeout(ms = REQUEST_TIMEOUT_MS) {
       clearTimeout(task.timer);
       task.timer = setTimeout(() => {
         task.timedOut = true;
         controller.abort();
-      }, REQUEST_TIMEOUT_MS);
+      }, ms);
     },
     finish() {
       clearTimeout(task.timer);
@@ -1995,6 +2004,7 @@ async function relocateFigures() {
   // 累计耗时：接着上一次的处理耗时往下算。
   state.startedAt = performance.now() - ((state.meta && state.meta.elapsed_ms) || 0);
   const task = startTask();
+  task.resetTimeout(LOCATE_TIMEOUT_MS);
   try {
     await locateFigures({ apiKey, model, signal: task.signal });
   } catch (e) {
@@ -2066,7 +2076,7 @@ async function analyze() {
     if (state.docxNote) showAlert($('warning'), 'Word 文档有部分内容读不到', state.docxNote);
 
     // 分类结果先展示出来，再单独计时定位图片；定位失败不影响已有结果。
-    task.resetTimeout();
+    task.resetTimeout(LOCATE_TIMEOUT_MS);
     await locateFigures({ apiKey, model, signal: task.signal });
   } catch (e) {
     const elapsed = performance.now() - started;
