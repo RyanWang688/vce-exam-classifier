@@ -219,7 +219,15 @@
     <section class="panel">
       <h2 class="panel-title">1. API 配置</h2>
       <label class="field">
-        <span>Gemini API Key</span>
+        <span>AI 服务</span>
+        <select id="provider">
+          <option value="gemini">Google Gemini</option>
+          <option value="openrouter">OpenRouter（免费备选）</option>
+          <option value="ollama">本地 Ollama（免费，不出电脑）</option>
+        </select>
+      </label>
+      <label class="field" id="keyField">
+        <span id="keyLabel">API Key</span>
         <div class="row">
           <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴你的 Key">
           <button id="toggleKey" type="button">显示</button>
@@ -229,14 +237,9 @@
       <label class="field">
         <span>模型 ID（可修改）</span>
         <input id="model" type="text" list="modelList" spellcheck="false">
-        <datalist id="modelList">
-          <option value="gemini-3.6-flash">稳定版 Flash</option>
-          <option value="gemini-3.8-flash">最新 Flash</option>
-          <option value="gemini-3.5-flash-lite">稳定版 Flash-Lite，较便宜</option>
-          <option value="gemini-3.1-flash-lite">Flash-Lite，2027-05 下线</option>
-        </datalist>
+        <datalist id="modelList"></datalist>
       </label>
-      <p class="hint">模型清单核对于 2026-11-06（Google AI 官方文档）。免费层额度按模型分开计算，实测 gemini-3.6-flash 每天 20 次请求（2026-11-06），具体以 Google AI Studio 显示为准。</p>
+      <p class="hint" id="providerHint"></p>
     </section>
 
     <section class="panel">
@@ -370,13 +373,40 @@
 
 /* ---------- 常量 ---------- */
 const DEFAULT_MODEL = 'gemini-3.6-flash';
+// 模型和额度核对于 2026-11-06。OpenRouter 免费模型会变动，用不了时在页面上换一个。
+const PROVIDERS = {
+  gemini: {
+    label: 'Gemini API Key',
+    model: DEFAULT_MODEL,
+    models: ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'],
+    needsKey: true,
+    hint: '免费层额度按模型分开计算，实测 gemini-3.6-flash 每天 20 次请求，以 Google AI Studio 显示为准。',
+  },
+  openrouter: {
+    label: 'OpenRouter API Key',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'nvidia/nemotron-3.5-super-vl:free',
+    models: ['nvidia/nemotron-3.5-super-vl:free', 'dots-studio/dots-3-note-preview:free', 'openrouter/free'],
+    needsKey: true,
+    hint: '免费模型每天 50 次、每分钟 20 次，失败的请求也可能计入。PDF 会转成页面图片发送。内容由模型提供方处理，部分提供方可能保留或用于训练，不要上传校内卷或学生信息。',
+  },
+  ollama: {
+    label: 'API Key',
+    baseUrl: 'http://localhost:11434/v1',
+    model: 'qwen3-vl:8b',
+    models: ['qwen3-vl:8b', 'qwen3-vl:4b', 'gemma4:12b'],
+    needsKey: false,
+    imageAsString: true, // Ollama 文档的 image_url 是字符串，不是 { url } 对象。
+    hint: '在本机运行，没有次数限制，内容不出电脑。需要先安装 Ollama 并下载模型，并用 localhost 打开本页（不能双击）。步骤见 README。',
+  },
+};
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_CHARS = 20 * 1024 * 1024; // 官方说明内联图片时请求总大小上限为 20MB。
 const DROP_HINT = '点击选择或拖入 PDF、Word（.docx）或图片。多页试卷可一次选多张图片，按文件名排序';
 const LOW_CONFIDENCE = 0.7;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
-const STORE = { key: 'vceDemo.apiKey', model: 'vceDemo.model', taxonomy: 'vceDemo.taxonomy', autoFigures: 'vceDemo.autoFigures' };
+const STORE = { key: 'vceDemo.apiKey', model: 'vceDemo.model', taxonomy: 'vceDemo.taxonomy', autoFigures: 'vceDemo.autoFigures', provider: 'vceDemo.provider' };
 
 const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 const PAGE_LONG_SIDE_PX = 2200;     // 截图清晰度：A4 长边约 190 DPI。
@@ -879,6 +909,123 @@ const STOP_MESSAGES = {
 };
 
 /* ---------- 调用 Gemini ---------- */
+async function sendJson(url, headers, body, signal, networkMessage) {
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    throw new UserError('网络请求失败', networkMessage, String(e));
+  }
+
+  const rawText = await response.text();
+  let data = null;
+  try { data = JSON.parse(rawText); } catch (e) { /* 下面统一处理 */ }
+  return { response, data, rawText };
+}
+
+function requireJson({ response, data, rawText }) {
+  if (!response.ok) throw explainApiError(response.status, data, rawText);
+  if (!data) throw new UserError('返回内容无法解析', '接口返回的不是 JSON，请重试。', rawText.slice(0, 2000));
+  return data;
+}
+
+// 分类用的 schema 是 Gemini 格式，OpenAI 兼容接口要标准 JSON Schema。
+function toJsonSchema(schema) {
+  const type = schema.type.toLowerCase();
+  const out = { type: schema.nullable ? [type, 'null'] : type };
+  if (schema.enum) out.enum = schema.enum;
+  if (schema.items) out.items = toJsonSchema(schema.items);
+  if (schema.properties) {
+    out.properties = Object.fromEntries(Object.entries(schema.properties).map(([k, v]) => [k, toJsonSchema(v)]));
+    out.required = schema.required || Object.keys(schema.properties);
+    out.additionalProperties = false;
+  }
+  return out;
+}
+
+function toOpenAiContent(parts, provider) {
+  return parts.map((part) => {
+    if (part.text) return { type: 'text', text: part.text };
+    const url = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+    return { type: 'image_url', image_url: provider.imageAsString ? url : { url } };
+  });
+}
+
+// 整理成 Gemini 的返回结构，后面的解析就不用区分来源。
+function fromOpenAiResponse(data) {
+  const choice = (data.choices || [])[0];
+  const usage = data.usage || {};
+  const finish = { stop: 'STOP', length: 'MAX_TOKENS', content_filter: 'SAFETY' };
+  const text = String((choice && choice.message && choice.message.content) || '')
+    .trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '');
+  return {
+    candidates: choice ? [{
+      finishReason: finish[choice.finish_reason] || 'STOP',
+      content: { parts: [{ text }] },
+    }] : [],
+    usageMetadata: {
+      promptTokenCount: usage.prompt_tokens,
+      candidatesTokenCount: usage.completion_tokens,
+      totalTokenCount: usage.total_tokens,
+    },
+  };
+}
+
+async function postOpenAi({ provider, apiKey, model, parts, schema, signal }) {
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const body = {
+    model,
+    temperature: 0,
+    max_tokens: 16000,
+    messages: [{ role: 'user', content: toOpenAiContent(parts, provider) }],
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'exam_result', strict: true, schema: toJsonSchema(schema) },
+    },
+  };
+  const networkMessage = provider.needsKey
+    ? '无法连接 OpenRouter，请检查网络和代理。'
+    : '无法连接本地 Ollama。请确认 Ollama 正在运行，并用 localhost 打开本页。';
+  const result = await sendJson(`${provider.baseUrl}/chat/completions`, headers, body, signal, networkMessage);
+  if (result.response.status === 429 && provider.needsKey) {
+    throw new UserError('OpenRouter 额度或频率用完（429）', '免费模型每天 50 次、每分钟 20 次。请稍后再试，或换一个 AI 服务。', result.rawText);
+  }
+  return fromOpenAiResponse(requireJson(result));
+}
+
+const currentProvider = () => PROVIDERS[$('provider').value];
+// Gemini 沿用原来的存储位置，已保存的 Key 不受影响。
+const providerStore = (base) => ($('provider').value === 'gemini' ? base : `${base}.${$('provider').value}`);
+
+function applyProvider() {
+  const provider = currentProvider();
+  $('keyField').hidden = !provider.needsKey;
+  $('keyLabel').textContent = provider.label;
+  $('providerHint').textContent = provider.hint;
+  $('apiKey').value = provider.needsKey ? storageGet(providerStore(STORE.key)) || '' : '';
+  $('model').value = storageGet(providerStore(STORE.model)) || provider.model;
+  const list = $('modelList');
+  list.textContent = '';
+  provider.models.forEach((model) => {
+    const option = el('option');
+    option.value = model;
+    list.append(option);
+  });
+  fillPrices($('model').value);
+  renderCost();
+}
+
+function postModel(options) {
+  const provider = currentProvider();
+  return provider.baseUrl ? postOpenAi({ ...options, provider }) : postGemini(options);
+}
+
 async function postGemini({ apiKey, model, parts, schema, signal }) {
   const url = API_BASE + encodeURIComponent(model) + ':generateContent';
   const body = {
@@ -891,26 +1038,8 @@ async function postGemini({ apiKey, model, parts, schema, signal }) {
     },
   };
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    throw new UserError('网络请求失败', '无法连接 Gemini。请检查网络和代理，或确认你所在的地区可以访问 Google API。', String(e));
-  }
-
-  const rawText = await response.text();
-  let data = null;
-  try { data = JSON.parse(rawText); } catch (e) { /* 下面统一处理 */ }
-
-  if (!response.ok) throw explainApiError(response.status, data, rawText);
-  if (!data) throw new UserError('返回内容无法解析', '接口返回的不是 JSON，请重试。', rawText.slice(0, 2000));
-  return data;
+  const networkMessage = '无法连接 Gemini。请检查网络和代理，或确认你所在的地区可以访问 Google API。';
+  return requireJson(await sendJson(url, { 'x-goog-api-key': apiKey }, body, signal, networkMessage));
 }
 
 async function buildPdfParts(taxonomy) {
@@ -925,9 +1054,11 @@ function assertRequestSize(parts, title, message) {
   if (size > MAX_REQUEST_CHARS) throw new UserError(title, message);
 }
 
+// 图片上传，以及不能直接读 PDF 的 AI 服务，都按页面图片发送。
 async function buildImageParts(taxonomy) {
   const parts = [];
-  for (let page = 1; page <= state.sourceFiles.length; page++) {
+  const count = await pageCount();
+  for (let page = 1; page <= count; page++) {
     const canvas = await getPageCanvas(page);
     parts.push({ text: `Page ${page}:` });
     parts.push({ inlineData: { mimeType: 'image/jpeg', data: canvas.toDataURL('image/jpeg', 0.85).split(',')[1] } });
@@ -1553,7 +1684,7 @@ async function postWithRetry(options) {
   const label = $('loaderText').textContent;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await postGemini(options);
+      return await postModel(options);
     } catch (e) {
       const wait = retryWaitSeconds(e, attempt);
       if (wait === null) throw e;
@@ -2062,7 +2193,7 @@ function renderCost() {
 }
 
 function fillPrices(model) {
-  const price = PRICES[model];
+  const price = currentProvider().baseUrl ? [0, 0] : PRICES[model]; // 备选服务的免费模型不收费。
   if (!price) return;
   $('priceIn').value = price[0];
   $('priceOut').value = price[1];
@@ -2163,7 +2294,7 @@ async function relocateFigures() {
   clearAlerts();
   const apiKey = $('apiKey').value.trim();
   const model = $('model').value.trim().replace(/^models\//, '');
-  if (!apiKey || !model) {
+  if ((!apiKey && currentProvider().needsKey) || !model) {
     showAlert($('error'), '缺少配置', '请先在左侧填写 API Key 和模型 ID。');
     return;
   }
@@ -2197,7 +2328,7 @@ async function analyze() {
   const model = $('model').value.trim().replace(/^models\//, '');
   const taxonomy = validateTaxonomy();
 
-  if (!apiKey) { showAlert($('error'), '缺少 API Key', '请先在左侧填写 Gemini API Key。'); return; }
+  if (!apiKey && currentProvider().needsKey) { showAlert($('error'), '缺少 API Key', `请先在左侧填写 ${currentProvider().label}。`); return; }
   if (!model) { showAlert($('error'), '缺少模型 ID', '请先在左侧填写模型 ID。'); return; }
   if (!taxonomy) {
     showAlert($('error'), '分类表有误', '请修正左侧分类表的 JSON 后再试。');
@@ -2236,7 +2367,8 @@ async function analyze() {
   let classified = false;
 
   try {
-    const builders = { pdf: buildPdfParts, docx: buildDocxParts, images: buildImageParts };
+    const readsPdf = !currentProvider().baseUrl;
+    const builders = { pdf: readsPdf ? buildPdfParts : buildImageParts, docx: buildDocxParts, images: buildImageParts };
     const parts = await builders[state.sourceKind](taxonomy);
     const data = await postWithRetry({ apiKey, model, parts, schema: RESPONSE_SCHEMA, signal: task.signal });
     const elapsed = performance.now() - started;
@@ -2512,16 +2644,20 @@ function exportCsv() {
 /* ---------- 初始化 ---------- */
 function init() {
   $('dropText').textContent = DROP_HINT;
-  $('apiKey').value = storageGet(STORE.key) || '';
-  $('model').value = storageGet(STORE.model) || DEFAULT_MODEL;
+  $('provider').value = PROVIDERS[storageGet(STORE.provider)] ? storageGet(STORE.provider) : 'gemini';
+  $('priceIn').value = 0;
+  $('priceOut').value = 0;
+  applyProvider();
+  $('provider').addEventListener('change', () => {
+    storageSet(STORE.provider, $('provider').value);
+    applyProvider();
+  });
   $('autoFigures').checked = storageGet(STORE.autoFigures) !== '0';
   $('autoFigures').addEventListener('change', () => storageSet(STORE.autoFigures, $('autoFigures').checked ? '1' : '0'));
   $('taxonomy').value = storageGet(STORE.taxonomy) || JSON.stringify(DEFAULT_TAXONOMY, null, 2);
-  fillPrices($('model').value);
-  if (!$('priceIn').value) fillPrices(DEFAULT_MODEL);
   validateTaxonomy();
 
-  $('apiKey').addEventListener('input', () => storageSet(STORE.key, $('apiKey').value.trim()));
+  $('apiKey').addEventListener('input', () => storageSet(providerStore(STORE.key), $('apiKey').value.trim()));
   $('toggleKey').addEventListener('click', () => {
     const show = $('apiKey').type === 'password';
     $('apiKey').type = show ? 'text' : 'password';
@@ -2529,10 +2665,10 @@ function init() {
   });
   $('clearKey').addEventListener('click', () => {
     $('apiKey').value = '';
-    storageSet(STORE.key, '');
+    storageSet(providerStore(STORE.key), '');
   });
   $('model').addEventListener('input', () => {
-    storageSet(STORE.model, $('model').value.trim());
+    storageSet(providerStore(STORE.model), $('model').value.trim());
     fillPrices($('model').value.trim());
     renderCost();
   });

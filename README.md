@@ -42,6 +42,47 @@ npx serve .
 
 页面顶部的“已确认题 AI 准确率”是已确认的题目中，三个分类字段都没被改动的比例。导出文件保留了 AI 原值（`ai_topic` 等字段），可以用来逐题对比。
 
+## 选择 AI 服务
+
+左上角可以切换 AI 服务，每个服务的 Key 和模型分开保存。额度核对于 2026-11-06。
+
+| 服务 | 费用和额度 | 隐私 | 适合 |
+|---|---|---|---|
+| Google Gemini | 免费层 `gemini-3.6-flash` 每天 20 次；付费最低预存 5 美元 | 免费层可能用于改进产品；付费不会 | 默认选择，唯一实测过效果的服务 |
+| OpenRouter | 免费模型每天 50 次，每分钟 20 次 | 取决于模型提供方，可能保留或用于训练 | 公开真题，Gemini 额度用完时 |
+| 本地 Ollama | 免费，没有次数限制 | 不出电脑 | 校内卷、大批量 |
+
+OpenRouter 和 Ollama 不能直接读 PDF，页面会把每页转成图片发送，所以一份 30 页的试卷请求会比较大。这两个服务的效果都还没有实测，定位配图的 `box_2d` 也是按 Gemini 的约定写的，建议先关闭“自动截图配图”。
+
+### 使用 OpenRouter
+
+1. 到 [openrouter.ai/keys](https://openrouter.ai/keys) 注册并创建 Key，免费模型不需要充值。
+2. 在页面选择 OpenRouter，粘贴 Key。
+3. 如果默认模型不可用，到 [免费模型列表](https://openrouter.ai/collections/free-models) 选一个支持图片的模型，把 ID 填进模型框。
+
+### 使用本地 Ollama
+
+1. 安装 [Ollama](https://ollama.com/download)。
+2. 下载模型（约 6.2GB），8GB 显存较合适：
+
+```bash
+ollama pull qwen3-vl:8b
+```
+
+3. 调大上下文长度，默认的 4096 放不下一份试卷。设置后重启 Ollama：
+
+```bash
+setx OLLAMA_CONTEXT_LENGTH 32768
+```
+
+4. 用本地服务器打开页面，不要双击文件。Ollama 默认只允许本机地址跨域访问：
+
+```bash
+python -m http.server 8000
+```
+
+5. 打开 `http://127.0.0.1:8000`，选择“本地 Ollama”。
+
 ## 支持的文件
 
 | 格式 | 配图 | 页码 | 注意 |
