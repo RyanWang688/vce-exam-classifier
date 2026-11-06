@@ -1045,7 +1045,8 @@ function ommlRun(n) {
   return raw.split(OMML_FUNCTIONS).map((piece, index) => {
     if (index % 2) return `${TEX_FUNCTIONS[piece]} `;
     return [...piece].map((ch) => (TEX_SYMBOLS[ch] !== undefined && !/[a-zA-Z0-9]/.test(ch) ? TEX_SYMBOLS[ch] : ch)).join('');
-  }).join('');
+  }).join('').replace(/(\\[a-z]+ )(\d+)(?![.\d])/g, (match, name, digits) => (/\\(?:alpha|beta|gamma|delta|varepsilon|theta|lambda|mu|sigma|phi|varphi|omega) /.test(name) ? `${name.trim()}_{${digits}}` : match))
+    .replace(/(^|[^\\a-zA-Z])([a-zA-Z])(\d+)(?![.\d])/g, (match, before, letter, digits) => (raw.length <= 4 ? `${before}${letter}_{${digits}}` : match)); // x1 单独成段时是下标。
 }
 
 function ommlNary(n) {
@@ -1382,12 +1383,13 @@ function parseResult(data) {
 /* ---------- 非 AI 模式：规则切题 ---------- */
 // VCE 试卷格式规整：题号、Section、小问、选项和分值都有固定写法，用规则就能解析。
 const QUESTION_LINE = /^Question\s+(\d+)\b(?!.*\bcontin)\s*(.*)$/i; // OCR 常把 continued 读成 continuec。
+const PART_HEADING = /^Part\s+([A-Z])\s*[:|]\s*(.*)$/;
 const SECTION_LINE = /^SECTION\s*([A-Z0-9])\b(?!.*\bcontin)/i;
 const END_LINE = /^End of (?:examination|question|section|paper|book)/i;
-const NOISE_LINE = /(?:do not write|continues on the next page|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^copyright|^©|^\d+$|turn over|^end$)/i;
+const NOISE_LINE = /(?:do not write|continues on the next page|^Part\s+[A-Z]:?\s*contin|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^copyright|^©|^\d+$|turn over|^end$)/i;
 const MARKS_ONLY = /^(\d+)\s+marks?$/i;
-const PART_LINE = /^([a-l])\.\s*(.*)$/;
-const ROMAN_LINE = /^(iv|v?i{1,3}|v)\.\s*(.*)$/;
+const PART_LINE = /^\(?([a-l])[.)]\s*(.*)$/;
+const ROMAN_LINE = /^\(?(iv|v?i{1,3}|v)[.)]\s*(.*)$/;
 const OPTION_LINE = /^[A-E]\.\s/;
 const AREA_LINE = /^(Data analysis|Recursion and financial modelling|Matrices|Networks and decision mathematics)$/i;
 const FIGURE_GAP_INK = 14; // 超过这段空白（1100 像素比例）就算另一块内容。
@@ -1397,6 +1399,7 @@ const OCR_QUESTION_LINE = /^Qu?[ec]?s?[tf][il1!]?[o0]n\b\s*(\S*)\s*(.*)$/i;
 const OCR_DIGITS = { O: '0', o: '0', I: '1', l: '1', '|': '1', S: '5', s: '5', G: '6', B: '8', Z: '2', z: '2' };
 const OCR_PART_MISREADS = { b: 'h6D', c: 'eC(', d: 'cl', e: 'cC', f: 'tF£{r', g: 'q9', h: 'bn' };
 const ocrCells = new Map();     // 页码 → OCR 结果，遮挡文字时复用。
+const ocrLayouts = new Map();   // 页码 → 字形和线条，用来还原公式。
 let ocrWorker = null;
 
 function cleanPdfText(text) {
@@ -1444,6 +1447,14 @@ function withoutSideBars(canvas) {
   return copy;
 }
 
+function copyCanvas(canvas) {
+  const copy = document.createElement('canvas');
+  copy.width = canvas.width;
+  copy.height = canvas.height;
+  copy.getContext('2d').drawImage(canvas, 0, 0);
+  return copy;
+}
+
 // 没有文字层的页面用 OCR 识别，得到和文字层相同的结构，后面的规则不用区分来源。
 async function ocrPageCells(number, viewport) {
   if (!window.Tesseract) {
@@ -1451,7 +1462,9 @@ async function ocrPageCells(number, viewport) {
   }
   if (!ocrWorker) ocrWorker = await window.Tesseract.createWorker('eng');
   const canvas = await getPageCanvas(number);
-  const { data } = await ocrWorker.recognize(withoutSideBars(canvas));
+  const clean = withoutSideBars(canvas);
+  const { data } = await ocrWorker.recognize(clean);
+  ocrLayouts.set(number, ocrLayoutFrom(data, clean === canvas ? copyCanvas(canvas) : clean, viewport));
   const scale = viewport.width / canvas.width;
   const cells = [];
   (data.lines || []).forEach((line) => {
@@ -2336,9 +2349,21 @@ function outlineAtoms(outlines, atoms, figures) {
 }
 
 function makeAtom(glyph) {
+  // LaTeX 的放大括号从基线往下画，字形比字号高得多。
+  if (/MathExtension|CMEX/i.test(glyph.fontName) && hasChar('()[]{}', glyph.ch)) {
+    const top = glyph.y - 1;
+    const bottom = glyph.y + glyph.size * (hasChar('{}', glyph.ch) ? 3.4 : 2.1); // 花括号通常跨三行。
+    return {
+      ch: glyph.ch, x0: glyph.x0, x1: glyph.x1, y: (top + bottom) / 2 + glyph.size * 0.28, size: glyph.size, top, bottom,
+      italic: false, bold: false, symbol: true, delim: true, stacked: true,
+    };
+  }
+  // 黑板体 R、N、Z、Q、C。
+  if (/MSBM/i.test(glyph.fontName) && /^[RNZQC]$/.test(glyph.ch)) glyph.ch = { R: 'ℝ', N: 'ℕ', Z: 'ℤ', Q: 'ℚ', C: 'ℂ' }[glyph.ch];
   return {
     // MT Extra 里的这个字形是写在字母下面的波浪号，不是箭头。
-    ch: glyph.ch === ARROW_PIECE && /MT-?Extra/i.test(glyph.fontName) ? '˜' : glyph.ch, x0: glyph.x0, x1: glyph.x1, y: glyph.y, size: glyph.size,
+    ch: glyph.ch === ARROW_PIECE && /MT-?Extra/i.test(glyph.fontName) ? '˜' : glyph.ch,
+    ocrText: Boolean(glyph.ocrText), x0: glyph.x0, x1: glyph.x1, y: glyph.y, size: glyph.size,
     top: glyph.y - glyph.size * 0.72, bottom: glyph.y + glyph.size * 0.22,
     italic: Boolean(glyph.mathItalic) || /Italic|Oblique/i.test(glyph.fontName),
     bold: /Bold/i.test(glyph.fontName),
@@ -2362,7 +2387,7 @@ function mergeStacks(atoms) {
       const last = g[g.length - 1];
       // 括号到了下端就结束，否则上下相邻两个选项的括号会连成一个。
       if ('⎝⎠⎣⎦⎩⎭⌡'.includes(last.ch)) return false;
-      return Math.abs(last.x0 - piece.x0) <= 1.5 && piece.y - last.y <= last.size * 1.7;
+      return Math.abs(last.x0 - piece.x0) <= 1.5 && piece.y - last.y <= last.size * 2.2;
     });
     if (group) group.push(piece);
     else groups.push([piece]);
@@ -2599,6 +2624,15 @@ function drawnSymbols(atoms, rules, bars) {
 }
 
 // lim 下面的 x → ∞ 是小字，和 lim 不在一行。
+function markTallOperators(atoms) {
+  atoms.forEach((a) => {
+    if (!hasChar('∫∑∏', a.ch)) return;
+    // 上下都有小字且左右对齐的，是大号运算符。
+    const near = atoms.filter((b) => b !== a && b.size < a.size * SCRIPT_RATIO && b.x0 < a.x1 + a.size && b.x1 > a.x0 - a.size);
+    a.tallGlyph = near.some((b) => Math.abs(b.y - a.y) > a.size * 0.9) || a.x1 - a.x0 > a.size * 0.9;
+  });
+}
+
 function applyLimits(atoms) {
   let list = atoms;
   atoms.filter((a) => a.ch === 'l' && !a.italic).forEach((l) => {
@@ -2620,11 +2654,12 @@ function applyLimits(atoms) {
 
 // 积分和求和的上下限。
 function applyBigOperators(atoms) {
+  markTallOperators(atoms);
   let list = applyLimits(atoms);
   atoms.filter((a) => a.ch === '∫' || a.ch === '∑' || a.ch === '∏').forEach((op) => {
     const integral = op.ch === '∫';
     const mid = op.stacked ? (op.top + op.bottom) / 2 : op.y - op.size * 0.25;
-    const reach = op.stacked ? (op.bottom - op.top) / 2 + op.size * 0.5 : op.size * 1.05;
+    const reach = op.stacked ? (op.bottom - op.top) / 2 + op.size * 0.5 : op.size * (op.tallGlyph ? 1.9 : 1.05);
     const small = list.filter((a) => a !== op && a.size < Math.min(op.size, 12.5) * SCRIPT_RATIO && Math.abs(a.y - mid) < reach && Math.abs(a.y - mid) >= op.size * 0.15);
     const pick = (group) => {
       const sorted = group.sort((a, b) => a.x0 - b.x0);
@@ -2844,7 +2879,7 @@ function splitLines(atoms) {
         const reach = Math.max(s * 0.45, ((atom.bottom - atom.top) / 2) * 0.7);
         fits = distance <= reach && gapTo(atom, line) <= s * 5;
       } else if (atom.size >= s * SCRIPT_RATIO) {
-        fits = distance <= s * 0.25;
+        fits = distance <= s * 0.25 || (distance <= s * 0.62 && gapTo(atom, line) <= s * 0.25);
       } else if (distance <= s * 0.1) {
         fits = true;
       } else if (atom.y - line.y >= -s * 0.68 && atom.y - line.y <= s * 0.45) {
@@ -2868,21 +2903,30 @@ function buildItems(atoms) {
   const sorted = [...atoms].sort((a, b) => a.x0 - b.x0);
   const plain = sorted.filter((a) => !a.box && !a.delim && !isDelimiterChar(a.ch) && !hasChar('∫∑∏√', a.ch));
   const base = Math.max(...(plain.length ? plain : sorted).map((a) => a.size));
+  // 同字号的上下标：只认紧贴在字母后面的字母或数字（有的软件导出时不缩小字号）。
+  const isLiftedChar = (a) => {
+    if (a.fromImage || !/^[A-Za-z0-9]$/.test(a.ch || '')) return false;
+    const index = sorted.indexOf(a);
+    const before = sorted[index - 1];
+    return Boolean(before) && !before.box && (isLetter(before.ch) || /[\u0370-\u03ff]/.test(before.ch)) && a.x0 - before.x1 <= base * 0.2;
+  };
   const main = sorted.filter((a) => a.size >= base * 0.9);
   const ys = (main.filter((a) => !a.box && !a.delim).length ? main.filter((a) => !a.box && !a.delim) : main).map((a) => a.y).sort((a, b) => a - b);
   const baseline = ys[Math.floor(ys.length / 2)];
-  const isScript = (a) => !a.display && a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.1;
+  const isScript = (a) => !a.ocrText && !a.display && !a.box && !a.delim && ((a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.1) ||
+    (isLiftedChar(a) && Math.abs(a.y - baseline) > base * 0.16 && Math.abs(a.y - baseline) < base * 0.7));
+  const isSmallBox = (a) => a.box && !a.display && a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.1;
   const items = [];
   let index = 0;
   while (index < sorted.length) {
     const atom = sorted[index];
-    if (!isScript(atom)) {
+    if (!isScript(atom) && !isSmallBox(atom)) {
       items.push({ ...atom });
       index += 1;
       continue;
     }
     const run = [];
-    while (index < sorted.length && isScript(sorted[index])) run.push(sorted[index++]);
+    while (index < sorted.length && (isScript(sorted[index]) || isSmallBox(sorted[index]))) run.push(sorted[index++]);
     const up = run.filter((a) => a.y < baseline);
     const down = run.filter((a) => a.y >= baseline);
     const previous = items[items.length - 1];
@@ -2941,6 +2985,15 @@ const isRomanLetter = (item) => !item.box && isLetter(item.ch) && !item.italic &
 
 // 一串字形转成 LaTeX。keepGaps 用在分段函数里：很宽的空白分开表达式和条件。
 function itemsToTex(items) {
+  return flatSubscripts(rawItemsToTex(items));
+}
+
+// 希腊字母后面紧跟数字，只可能是下标（θ1 → θ₁）。Word 里常直接打成一串。
+function flatSubscripts(tex) {
+  return tex.replace(/(\\(?:alpha|beta|gamma|delta|varepsilon|theta|lambda|mu|sigma|phi|varphi|omega|pi) )(\d+)(?![.\d])/g, (match, name, digits) => `${name.trim()}_{${digits}}`);
+}
+
+function rawItemsToTex(items) {
   let out = '';
   let index = 0;
   while (index < items.length) {
@@ -3071,7 +3124,7 @@ function classifyItems(items) {
     }
     // 选项和小问的编号。
     const label = word.map((a) => a.ch).join('');
-    const isLabel = (text) => /^(?:[A-Ha-l]|i{1,3}|iv|v|vi{0,3})\.$/.test(text);
+    const isLabel = (text) => /^(?:(?:[A-Ha-l]|i{1,3}|iv|v|vi{0,3})\.|\((?:[a-l]|i{1,3}|iv|v|vi{0,3})\))$/.test(text);
     const afterLabel = wordIndex === 1 && isLabel(words[0].map((a) => a.ch).join(''));
     if ((wordIndex === 0 || afterLabel) && isLabel(label)) word.forEach((a) => { a.kind = 'T'; });
     const hasText = word.some((a) => a.kind === 'T');
@@ -3087,7 +3140,7 @@ function classifyItems(items) {
   // 整句斜体时，短词也是文字。
   if (words.filter((w) => w.emphasis).length) {
     words.forEach((word) => {
-      if (word.length >= 2 && word.every((a) => (isLetter(a.ch) && a.italic) || hasChar('().,', a.ch))) word.forEach((a) => { a.kind = 'T'; });
+      if (word.length >= 2 && word.every((a) => (isLetter(a.ch) && a.italic) || hasChar('.,', a.ch))) word.forEach((a) => { a.kind = 'T'; });
     });
   }
   // 公式旁边的数字算公式，文字旁边的数字算文字。
@@ -3174,6 +3227,7 @@ function layoutRows(layout, viewport, number) {
     seen.add(key);
     atoms.push(makeAtom(glyph));
   });
+  atoms.push(...(layout.extraAtoms || []));
   atoms.push(...outlineAtoms(layout.outlines, atoms, layout.figures.filter((f) => (f.x1 - f.x0) * (f.y1 - f.y0) < viewport.width * viewport.height * 0.45)));
   let list = mergeStacks(applyAccents(atoms)).concat(bracketAtoms(layout.brackets));
   list = applyRules(list, layout.rules, layout.bars, layout.radicals);
@@ -3251,6 +3305,462 @@ async function imageViewport(number) {
   return { width: 595, height: (595 * canvas.height) / canvas.width };
 }
 
+/* ---------- 图片和扫描件：按字形还原公式 ---------- */
+// Tesseract 读英文很好，但认不出公式结构。正文用它的结果；其余墨迹切成单个字形，
+// 和字体参考表比对，再交给上面同一套分数、上下标还原逻辑。
+const TIMES_REFS = parseGlyphTable(`𝐴 00000200600e01600600604608610620470e 68 0 -5 59
+𝑎 03908718630620660640cc0cc1cc2ce5a71c 45 1 2 47
+A 0000600600b00b00101181f820c20c40460e 68 0 1 70
+a 1f0618e1c61c01c0dc21ce1cc1ce1cfff78c 46 1 4 40
+𝐵 0fc0430c30c30861f818c10610630630c7f0 67 0 -2 61
+𝑏 1e00c00c00c019c347303703606606c08760 70 1 4 43
+B 7f83063063063063fc30e3073033033067fc 67 0 2 59
+b 30030030030033c38e3073033033023041f8 70 1 0 47
+𝐶 065183300600600c00c00c00c00c006001f0 68 1 7 63
+𝑐 03e0c3107306600e00e00c00e00e047f83e0 45 1 3 40
+C 0f9303601e01c00c00c00c00e006013020f8 68 1 4 58
+c 0f830e607606e00e00e00e017017823fc0f0 46 1 3 38
+𝐷 0f80860820831831031031023062042087f0 67 0 -3 74
+𝑑 00700300600607410c20c608c18c38c54738 70 1 2 54
+D 7f020c20620620320320320320220620c7f0 67 0 2 67
+d 00c00c00c00c1fc60c60cc0cc0ce0c70c3ec 70 1 3 47
+𝐸 0ff0c00c00800881f81901003003002047fc 67 0 -2 66
+𝑒 03e0c318330760c638fc0e00e02e047f83e0 45 1 3 40
+E 7fe3023003003043fc3043043003013037fe 67 0 2 56
+e 0f830e60ec07fffc00c00e01e017823fc0f0 46 1 4 38
+𝐹 0ff0c10800801881f8110100300200200700 67 0 -2 69
+𝑓 0050180100f80200600600400c0080100a00 70 22 -18 65
+F 7ff3813803803843fc384380380380380380 67 0 2 49
+f 07e187180180ff81801801801801801803c0 70 0 4 40
+𝐺 065101300600600c00c0ec04c0c4086081f0 68 1 7 65
+𝑔 0d810c30c30c1180803003e043880c808630 45 22 -2 54
+G 0f8306602402c00c1fc06c066066063060f8 68 1 3 68
+g 1b060c60c60c3081e06007fe203401e023f8 46 22 3 45
+𝐻 1861841041041041fc308208208218610638 67 0 -2 82
+ℎ 1e00600c00c018719312338670660c60dc1c 70 1 2 44
+H 70e20420420420420420420420420420470e 67 0 2 68
+h 30030030030033838c30c30c30c30c30c70e 70 0 1 48
+𝐼 03e0180180300300600600e00c01c01807c0 67 0 -3 44
+𝑖 01f01e00000c07c0780f01e03c0780798fc0 64 1 5 22
+I 1f80f00f00f00f00f00f00f00f00f00f01f8 67 0 2 29
+i 0f80700000000f81f80f80f80f80f80f81fc 70 0 3 22
+𝐽 01e00c00c008018018030030030c60c40580 67 1 -3 56
+𝑗 00700000000c00c0180180300300600c0900 64 22 -17 45
+J 0fc038038038038038038038038038e307c0 67 1 2 36
+j 01f00000000f00f00f00f00f00f00f00eff0 70 22 -7 27
+𝐾 1c60841801a01401c034036022023061063c 67 0 -2 75
+𝑘 1e00c00c018019f1083203e0760660434c38 70 1 1 48
+K 71c2102202602803802c026027023821c71e 67 0 2 71
+k 30030030030031e3183203c036033031871e 70 0 1 49
+𝐿 0700600600600c00c00801801801813027fe 67 0 -3 55
+𝑙 0ff01e01c0380700f01e03c0380700f20f80 70 1 4 26
+L 7803003003003003003003003003013027fe 67 0 2 56
+l 0f00f00f00f00f00f00f00f00f00f00f01f8 70 0 3 23
+𝑀 10210618608c0842942840ac0880c8488498 67 0 0 96
+𝑚 6232672a932b633622662462446c45cc48c4 45 1 2 66
+M 60660670e50e5065964964864e6466446446 67 0 2 84
+m 4ccdde662462462462462462462462462ff7 46 0 1 76
+𝑁 1860800c0144144160020228238010010e00 67 1 -3 78
+𝑛 38619f12310734638670660c60c609c1ac08 45 1 2 45
+N 6063003802c02c026023021821c20c204700 67 1 -1 72
+n 338f7c30c30c30c30c30c30c30c30c30cf9f 46 0 1 48
+𝑂 06c182303203603c03c02c06c04c0c418360 68 1 6 66
+𝑜 03c086303703603e07e07c06c0ec0c6103c0 45 1 3 43
+O 0f030c606402c03c03c03c034026063040f0 68 1 3 66
+o 0f031c60e606e07e07e07e0760670638c0f0 46 1 3 44
+𝑃 0fc0c30c30c308618c180100100300200700 67 0 -2 65
+𝑝 1ee0430c30c3083186184198300300200700 45 22 -10 57
+P 7f830e30730730730e370300300300300780 67 0 2 50
+p 33c38e30730330330330638c300300300780 46 22 0 47
+𝑄 044102303603403c06c04408630100400bf8 68 22 5 67
+𝑞 06b186306606e0cc1cc287980100300300f0 45 22 2 45
+Q 1f8204406c03c03c03c0360630c070038004 68 20 3 66
+q 1f460c40cc0cc0cc0c61c3ec00c00c00c01e 46 22 3 47
+𝑅 0fe0630430c308609c19019810830c30c706 67 0 -2 59
+𝑟 3c31cf1971a2380340380300700600600c00 45 0 2 39
+R 7f021821821821823026022023021820c70e 67 0 2 66
+r 18ff9f1e21c01801801801801801801c0ff8 46 0 1 32
+𝑆 0791831821800c007003801c00c40cc08930 68 1 1 53
+𝑠 0790c31c21c20e007003801c41c40cc189e0 45 1 -1 38
+S 1f2606c02e027803f007c01f807803c069f8 68 1 6 44
+s 3f240ec02e02f807f00fe01f807c07e06bf8 46 1 5 30
+𝑇 7ff4600600400c00c0080180180180300780 67 0 7 57
+𝑡 0040180f80f00e01e03c0380780f00e20f80 57 1 4 25
+T fff8610600600600600600600600600600f0 67 0 3 55
+t 0200e03e0fff1e01e01e01e01e01e01e10fc 59 1 1 26
+𝑈 706200204604404400c08c088008104003c0 67 1 10 71
+𝑢 18358398610630630c70c60c628648e98618 45 1 3 45
+U 7062002002002002002002002042043040f0 67 1 1 70
+u f3c30c30c30c30c30c30c30c30c31c3ef1cc 45 1 0 50
+𝑉 706204208610600620600680700600400000 67 1 13 59
+𝑣 3033033811811821841841880d00e00c0000 45 1 2 42
+V 7062023041041801880c80d0050060060000 67 1 1 70
+v f8f3023043041881880c80d00f0070060020 45 1 1 48
+𝑊 e634604644c0448540450640c60c40840800 67 1 13 81
+𝑤 601631231231270232290294310318210210 45 1 2 64
+W 662462622220220274354110190198008000 67 1 1 93
+w ef3662622622230274354114198198108008 45 1 1 70
+𝑋 0c70c40400400400600600a0020130210e38 67 0 -6 80
+𝑥 1c31c70480700600600600300b0132e1cc18 45 1 -3 47
+X 7861041880d00e00600700b001810820c60e 67 0 1 70
+x f9e3081901d00e00e00f00b011821c20cf1f 45 0 1 48
+𝑌 7063041081901a00c0080180180180300780 67 0 9 57
+𝑦 1c3041041042064068060060000080d00c00 45 22 -8 52
+Y 7063043001880d00d0060060060060060060 67 0 1 70
+y 7063043841880c80f0070020060040780700 45 22 1 48
+𝑍 1ff20600c0180300600e01c0180300604ff8 67 0 0 61
+𝑧 1ff1fe2040080100200400801002047fcff8 44 0 -3 43
+Z 3fe00c41c0180300600e01c0180301601ffe 67 0 1 57
+z 7ff40e40c01c0380700e01c0381301701fff 45 0 2 41
+0 0f030c606e07e07e07e07e07e0760630c0f0 68 1 4 42
+1 0701f00f00f00f00f00f00f00f00f00f01f8 68 0 13 25
+2 1f861c40e00600600c018020040180201ffe 68 0 2 44
+3 1f861e80e00c00807c01e007003002004ff0 68 1 4 38
+4 0080380380d8118118618818fff018018018 68 0 2 45
+5 0ff1803003807f801e007003003006c0c7e0 67 1 5 38
+6 01c0e0180300700f1ee07e07e036037061f8 68 1 4 42
+7 7ff40280600400c0180100300200600400c0 67 1 4 42
+8 1f8606c07e0678c1f01fc60ec07c036021f8 68 1 6 38
+9 1f060c406c07e07e0770f0ce00c018060380 68 1 4 42
+( 0060201c0780f00f00f00f807801c0030006 69 21 4 27
+) 6000c003801e01f00f00f00f01e038040600 69 21 2 27
+[ ffff00f00f00f00f00f00f00f00f00f00fff 68 20 8 21
+] fff00f00f00f00f00f00f00f00f00f00ffff 68 20 4 21
+{ 00c0600e00700701801800700700e006000c 69 21 14 27
+} 3800600700f00600180180600f0070060380 69 21 8 27
+, 3f87fcffefff3ff00700600e0180781c0e00 10 17 5 15
+. 3fc7feffffffffffffffffff7fe7fe7fe0f0 9 1 7 10
+; 3f83f8000000000000000ffcffe006038700 46 17 7 15
+: 3fcfff1f80000000000000000001f8fff3fc 46 1 8 11
++ 000000000000000000000000000000000000 59 -7 2 52
+= fffffffff000000000000000000fffffffff 43 -23 2 52
+/ 00300600c0080100200600c0100300600c00 70 1 0 28
+< 001006018060380c00c00380060018006001 57 -9 2 52
+> 80060018006001c00700301c060180600800 57 -9 2 52
+| ffffffffffffffffffffffffffffffffffff 70 21 8 3
+' 7fefffffffffffe7fe7fe1f81f81f00f00f0 68 -40 4 9
+! 7feffffff7fe3fc3fc0f00f00600007fe7fe 68 1 11 10
+? 3fcc06e0760700e0180100200400000e00e0 68 1 4 36
+% 60490890891090052004a009089109109206 68 1 3 77
+$ 040646c42e407c01f007c047843846f5c040 72 7 5 40
+− ffffffffffffffffffffffffffffffffffff 35 -31 2 52`);
+// 试卷公式里的字母都是斜体，希腊字母和运算符也只有这些。候选越少，1 和 l、8 和 ε 越不容易混。
+const IMAGE_SYMBOLS = new Set('αβγδθλμπρστφωΓΔΘΛΠΣΦΩ+−×÷=<>≤≥≠∈∉∞∫∑∏√()[]{}|,.;:/±′→←↔⇒∪∩∅≈~∼!?%$ℝℚℕℤℂ\u20d7'.split('').concat(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']));
+const IMAGE_REFS = [...TIMES_REFS, ...CAMBRIA_REFS, ...GLYPH_REFS].filter((ref) => {
+  if (IMAGE_SYMBOLS.has(ref.ch)) return true;
+  const italic = /[\u{1D400}-\u{1D7CD}\u210E]/u.test(ref.ch);
+  if (!italic) return false;
+  const greek = ref.ch.codePointAt(0) >= 0x1D6A8;
+  return greek ? '𝛼𝛽𝛾𝛿𝜃𝜆𝜇𝜋𝜌𝜎𝜏𝜑𝜔'.includes(ref.ch) : !'𝑙𝐼𝐽𝑂𝑜'.includes(ref.ch);
+});
+
+function binaryPage(canvas) {
+  const { width, height } = canvas;
+  const data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, width, height).data;
+  const dark = new Uint8Array(width * height);
+  for (let i = 0; i < dark.length; i++) {
+    if (data[i * 4] * 0.3 + data[i * 4 + 1] * 0.59 + data[i * 4 + 2] * 0.11 < 150) dark[i] = 1;
+  }
+  return { dark, width, height };
+}
+
+function inkComponents({ dark, width, height }) {
+  const seen = new Uint8Array(width * height);
+  const stack = new Int32Array(width * height);
+  const parts = [];
+  for (let start = 0; start < dark.length; start++) {
+    if (!dark[start] || seen[start]) continue;
+    let top = 0;
+    stack[top++] = start;
+    seen[start] = 1;
+    const part = { x0: width, x1: 0, y0: height, y1: 0, area: 0 };
+    while (top) {
+      const at = stack[--top];
+      const x = at % width;
+      const y = (at - x) / width;
+      part.area += 1;
+      if (x < part.x0) part.x0 = x;
+      if (x > part.x1) part.x1 = x;
+      if (y < part.y0) part.y0 = y;
+      if (y > part.y1) part.y1 = y;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const next = ny * width + nx;
+          if (dark[next] && !seen[next]) { seen[next] = 1; stack[top++] = next; }
+        }
+      }
+    }
+    part.x1 += 1;
+    part.y1 += 1;
+    parts.push(part);
+  }
+  return parts;
+}
+
+// 长直线单独找：表格连成一整块，靠连通域拆不开。
+function longLines({ dark, width, height }, minRun) {
+  const rows = [];
+  for (let y = 0; y < height; y++) {
+    let run = 0;
+    for (let x = 0; x <= width; x++) {
+      if (x < width && dark[y * width + x]) { run += 1; continue; }
+      if (run >= minRun) rows.push({ x0: x - run, x1: x, y });
+      run = 0;
+    }
+  }
+  const merged = [];
+  rows.forEach((row) => {
+    const last = merged.find((m) => row.y - m.y1 <= 1 && Math.abs(row.x0 - m.x0) <= 4 && Math.abs(row.x1 - m.x1) <= 4);
+    if (last) last.y1 = row.y + 1;
+    else merged.push({ x0: row.x0, x1: row.x1, y0: row.y, y1: row.y + 1 });
+  });
+  return merged;
+}
+
+function glyphBits({ dark, width }, part) {
+  const w = part.x1 - part.x0;
+  const h = part.y1 - part.y0;
+  const bits = [];
+  for (let v = 0; v < 12; v++) {
+    for (let u = 0; u < 12; u++) {
+      const left = part.x0 + Math.floor((u * w) / 12);
+      const right = Math.max(left + 1, part.x0 + Math.floor(((u + 1) * w) / 12));
+      const top = part.y0 + Math.floor((v * h) / 12);
+      const bottom = Math.max(top + 1, part.y0 + Math.floor(((v + 1) * h) / 12));
+      let ink = 0;
+      for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) if (dark[y * width + x] || (part.also && part.also(x, y))) ink += 1;
+      bits.push(ink / ((right - left) * (bottom - top)) >= 0.42 ? 1 : 0);
+    }
+  }
+  return bits;
+}
+
+function rankGlyph(bits, part, baseline, size) {
+  const w = part.x1 - part.x0;
+  const h = part.y1 - part.y0;
+  const top = (baseline - part.y0) / size;
+  const bottom = (part.y1 - baseline) / size;
+  const width = w / size;
+  const aspect = Math.log(w / h);
+  return IMAGE_REFS.map((ref) => {
+    let differ = 0;
+    for (let i = 0; i < 144; i++) if (ref.bits[i] !== bits[i]) differ += 1;
+    const refAspect = Math.log(Math.max(ref.width, 0.02) / Math.max(ref.top + ref.bottom, 0.02));
+    const shape = size
+      ? Math.abs(ref.top - top) + Math.abs(ref.bottom - bottom) + Math.abs(ref.width - width)
+      : Math.abs(refAspect - aspect);
+    return { ch: ref.ch, score: differ / 144 + shape * (size ? 0.45 : 0.25) };
+  }).sort((a, b) => a.score - b.score);
+}
+
+// 分行：纵向重叠、横向相近的字形算一行。
+function clusterParts(parts) {
+  const parent = parts.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (let i = 0; i < parts.length; i++) {
+    for (let j = i + 1; j < parts.length; j++) {
+      const a = parts[i];
+      const b = parts[j];
+      const overlap = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+      const gap = Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1);
+      const tall = Math.max(a.y1 - a.y0, b.y1 - b.y0);
+      if (overlap >= Math.min(a.y1 - a.y0, b.y1 - b.y0) * 0.55 && gap <= tall * 2) parent[find(i)] = find(j);
+    }
+  }
+  const groups = new Map();
+  parts.forEach((part, i) => {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(part);
+  });
+  return [...groups.values()];
+}
+
+const median = (list) => [...list].sort((a, b) => a - b)[Math.floor(list.length / 2)];
+
+function isProseWord(word) {
+  const text = word.text.replace(/[.,:;?!)]+$/, '').replace(/^\(/, '');
+  if (/^(?:Qu?[ec]?s?[tf][il1!]?[o0]n|SECTION|Section|marks?)$/i.test(text)) return true; // 切题全靠这几个词，置信度低也不能丢。
+  if (/^(?:an|A|I|of|is|in|to|at|on|by|or|if|be|as|it|we|so|do|no|and|the|for|that|with)$/.test(text)) return word.confidence >= 30;
+  if (/^[A-Z]{3,}$/.test(text)) return word.confidence >= 60;
+  if (word.confidence < 55) return false;
+  if (/^(?:sin|cos|tan|log|sec|cot|dx|dy|cis|arctan|arcsin|arccos)$/.test(text)) return false;
+  if (/^[A-Za-z][a-z]{2,}$/.test(text)) return word.in_dictionary || word.confidence >= 80;
+  return /^[A-Za-z’'-]{2,}$/.test(text) && word.in_dictionary;
+}
+
+function ocrLayoutFrom(data, canvas, viewport) {
+  const image = binaryPage(canvas);
+  const k = viewport.width / canvas.width;
+  const lines = data.lines || [];
+  const allWords = lines.flatMap((line) => (line.words || []).map((word) => ({ word, line })));
+  const prose = allWords.filter(({ word }) => isProseWord(word));
+  const proseHeights = prose.map(({ word }) => word.bbox.y1 - word.bbox.y0);
+  const textSize = (proseHeights.length ? median(proseHeights) : 16 / k) / 0.72;
+
+  // 同一行的正文用同一基线，OCR 的框有抖动，不能让它变成上下标。
+  const baselines = new Map();
+  const lineBaseline = (line, fallback) => {
+    if (baselines.has(line)) return baselines.get(line);
+    const bottoms = (line.words || []).filter(isProseWord).flatMap((w) => (w.symbols || []).filter((s) => /[acemnorsuvwxz]/.test(s.text)).map((s) => s.bbox.y1));
+    const value = bottoms.length ? median(bottoms) : fallback;
+    baselines.set(line, value);
+    return value;
+  };
+  const glyphs = [];
+  const covered = [];
+  allWords.forEach(({ word, line }, index) => {
+    const isText = isProseWord(word);
+    // 题号、分值和小问编号挨着正文，也按文字处理。
+    const near = allWords[index + 1] && /^marks?\b/.test(allWords[index + 1].word.text);
+    const label = /^(?:[a-l]|i{1,3}|iv|v|vi|[A-E])[.)]$/.test(word.text) && line.words[0] === word;
+    if (near && /^[lI|]$/.test(word.text)) (word.symbols || []).forEach((symbol) => { symbol.text = '1'; }); // “1 mark” 的 1 常被读成 l。
+    const number = /^\(?[\dlI|]+\)?$/.test(word.text) && (near || /^Question$/i.test((allWords[index - 1] || { word: {} }).word.text || ''));
+    if (!isText && !near && !label && !number) {
+      // 函数名 Tesseract 读得准，留给它；同一个词里的括号和分数继续按字形比对。
+      const name = /(arcsin|arccos|arctan|sin|cos|tan|sec|cot|log|cis)/.exec(word.text);
+      const letters = word.symbols || [];
+      if (name && letters.length === word.text.length) {
+        const picked = letters.slice(name.index, name.index + name[1].length);
+        const flat = picked.filter((s) => /[acemnorsuvwxz]/.test(s.text)).map((s) => s.bbox.y1);
+        const baseline = flat.length ? median(flat) : word.bbox.y1;
+        picked.forEach((symbol) => {
+          covered.push(symbol.bbox);
+          glyphs.push({
+            ch: symbol.text, unicode: symbol.text, fontName: '', isSpace: false,
+            x0: symbol.bbox.x0 * k, x1: symbol.bbox.x1 * k, y: baseline * k, size: textSize * k,
+          });
+        });
+      }
+      return;
+    }
+    const { bbox } = word;
+    covered.push(bbox);
+    const symbols = (word.symbols || []).filter((s) => s.text.trim());
+    const flat = symbols.filter((s) => /[acemnorsuvwxzA-Z0-9]/.test(s.text)).map((s) => s.bbox.y1);
+    const baseline = flat.length ? median(flat) : bbox.y1;
+    // Tesseract 的单字框不可靠（mark 会排成 am rk），按词框平均分配，顺序才稳定。
+    const chars = [...symbols.map((symbol) => symbol.text).join('') || word.text];
+    const step = (bbox.x1 - bbox.x0) / chars.length;
+    chars.forEach((ch, i) => {
+      glyphs.push({
+        ch, unicode: ch, fontName: '', isSpace: false,
+        x0: (bbox.x0 + step * i) * k, x1: (bbox.x0 + step * (i + 1)) * k, y: lineBaseline(line, baseline) * k, size: textSize * k, ocrText: true,
+      });
+    });
+  });
+
+  const bandX = canvas.width * 0.03;
+  const within = (part, box) => {
+    const x = (part.x0 + part.x1) / 2;
+    const y = (part.y0 + part.y1) / 2;
+    return x >= box.x0 - 2 && x <= box.x1 + 2 && y >= box.y0 - 2 && y <= box.y1 + 2;
+  };
+  const minDot = Math.max(2, 0.6 / k);
+  const rawParts = inkComponents(image).filter((part) => part.x1 - part.x0 >= 1 && part.y1 - part.y0 >= 1 && part.area >= minDot && part.x0 > bandX && !covered.some((box) => within(part, box)));
+
+  const rules = [];
+  const radicals = [];
+  const figures = [];
+  const horizontal = longLines(image, Math.round(30 / k)).filter((l) => l.y1 - l.y0 <= 2.2 / k);
+  // 竖线：把图转置后用同样的方法找。
+  const turned = { dark: new Uint8Array(image.width * image.height), width: image.height, height: image.width };
+  for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) turned.dark[x * image.height + y] = image.dark[y * image.width + x];
+  const vertical = longLines(turned, Math.round(14 / k)).filter((l) => l.y1 - l.y0 <= 2.2 / k)
+    .map((l) => ({ x0: l.y0, x1: l.y1, y0: l.x0, y1: l.x1 }));
+  const toPoints = (l) => ({ x0: l.x0 * k, x1: l.x1 * k, y0: l.y0 * k, y1: l.y1 * k });
+  const small = [];
+  rawParts.forEach((part) => {
+    const w = part.x1 - part.x0;
+    const h = part.y1 - part.y0;
+    if (w * k > 45 || h * k > 40) {
+      const lineCount = horizontal.filter((l) => l.y0 >= part.y0 - 2 && l.y1 <= part.y1 + 2 && l.x1 - l.x0 >= w * 0.6).length;
+      if (lineCount < 2 && w * k > 40 && h * k > 30) figures.push({ ...toPoints(part), curved: true });
+      if (h * k <= 2.2 && w * k <= 280) rules.push(toPoints(part)); // 宽分数线。
+      return;
+    }
+    if (h * k <= 1.8 && w * k >= 3) { rules.push(toPoints(part)); return; }
+    // 根号：左下一个钩，上面一条长横线。
+    const topRow = Array.from({ length: w }, (_, i) => image.dark[(part.y0 + 1) * image.width + part.x0 + i]);
+    const firstInk = topRow.indexOf(1);
+    const rowInk = topRow.reduce((sum, v) => sum + v, 0);
+    if (w * k >= 8 && h * k >= 7 && firstInk > w * 0.12 && rowInk >= w * 0.45) {
+      radicals.push({ x0: part.x0 * k, ruleX0: (part.x0 + firstInk) * k, x1: part.x1 * k, y0: part.y0 * k, y1: (part.y0 + 1) * k, bottom: part.y1 * k, radical: true });
+      return;
+    }
+    small.push(part);
+  });
+
+  // i、j 的点，以及冒号。
+  const merged = [];
+  [...small].sort((a, b) => a.y0 - b.y0).forEach((part) => merged.push(part));
+  const parts = [];
+  merged.forEach((part) => {
+    const dot = parts.find((other) => other.dotted !== true && other.area <= part.area * 0.35 && other.y1 <= part.y0 + 1 && part.y0 - other.y1 <= (part.y1 - part.y0) * 0.6 &&
+      Math.min(other.x1, part.x1) - Math.max(other.x0, part.x0) >= (other.x1 - other.x0) * 0.4 && (part.x1 - part.x0) <= (part.y1 - part.y0) * 0.7);
+    if (dot) {
+      parts.splice(parts.indexOf(dot), 1);
+      const combined = { x0: Math.min(dot.x0, part.x0), x1: Math.max(dot.x1, part.x1), y0: dot.y0, y1: part.y1, area: dot.area + part.area, dotted: true };
+      parts.push(combined);
+    } else {
+      parts.push(part);
+    }
+  });
+
+  const extraAtoms = [];
+  const hintFor = (part) => {
+    const hit = allWords.find(({ word }) => within(part, word.bbox));
+    if (!hit) return '';
+    const symbol = (hit.word.symbols || []).find((s) => within(part, s.bbox));
+    return symbol ? symbol.text : '';
+  };
+  clusterParts(parts).forEach((group) => {
+    const heights = group.map((p) => p.y1 - p.y0);
+    const tall = median(heights.filter((h) => h >= Math.max(...heights) * 0.6));
+    const rows = group.filter((p) => p.y1 - p.y0 >= tall * 0.6 && p.y1 - p.y0 <= tall * 1.25);
+    const baseline = median(rows.map((p) => p.y1));
+    const measured = tall / 0.66;
+    // 公式和正文同字号：吸附到正文字号，或上下标字号，比对才稳定。
+    const size = Math.abs(measured - textSize) <= textSize * 0.3 ? textSize : Math.abs(measured - textSize * 0.7) <= textSize * 0.2 ? textSize * 0.7 : measured;
+    const usable = group.length >= 2;
+    group.forEach((part) => {
+      const h = part.y1 - part.y0;
+      const bits = glyphBits(image, part);
+      const isTallGlyph = h > tall * 1.45;
+      const ranked = rankGlyph(bits, part, baseline, usable && !isTallGlyph ? size : 0);
+      const shapeOnly = usable && !isTallGlyph ? ranked : rankGlyph(bits, part, baseline, 0);
+      const hint = hintFor(part);
+      const top3 = shapeOnly.slice(0, 6);
+      const pick = top3.find((c) => hint && c.ch.normalize('NFKC') === hint) || shapeOnly[0];
+      let ch = pick.ch;
+      const italic = /[\u{1D400}-\u{1D7FF}ℎ]/u.test(ch);
+      ch = ch.normalize('NFKC');
+      const isDelimiter = isTallGlyph && hasChar('()[]{}', ch);
+      const raised = usable && h < tall * 0.8 && part.y1 < baseline - tall * 0.2;
+      const lowered = usable && h < tall * 0.8 && part.y1 > baseline + tall * 0.12;
+      const script = raised || lowered;
+      const atomSize = (script ? size * 0.7 : size) * k;
+      extraAtoms.push({
+        ch, x0: part.x0 * k, x1: part.x1 * k, y: (script ? part.y1 : baseline) * k, size: atomSize, top: part.y0 * k, bottom: part.y1 * k,
+        italic, bold: false, symbol: !/[A-Za-z0-9]/.test(ch), delim: isDelimiter, stacked: isDelimiter,
+        tallGlyph: isTallGlyph, fromImage: true,
+      });
+    });
+  });
+  return { glyphs, rules: [...rules, ...horizontal.map(toPoints)], bars: vertical.map(toPoints), radicals, brackets: [], outlines: [], figures, extraAtoms };
+}
+
+function ocrRows(number, viewport) {
+  return layoutRows(ocrLayouts.get(number), viewport, number).map((row) => ({
+    ...row,
+    ocr: true,
+    math_problems: /\\[([]/.test(row.text) ? [...row.math_problems, '图片公式请对照截图'] : row.math_problems,
+  }));
+}
+
 // 把一页的文字块排成行。
 function rowsFromCells(unsorted, viewport, number) {
   const cells = unsorted.sort((a, b) => a.y - b.y);
@@ -3316,10 +3826,24 @@ async function readPdfRows(onPage = () => {}) {
     } else {
       unsorted = await pageCells(page, number, viewport);
     }
-    pages.push({ number, rows: rowsFromCells(unsorted, viewport, number), height: viewport.height, width: viewport.width });
+    const scannedRows = bestOcrRows(number, viewport, unsorted);
+    pages.push({ number, rows: scannedRows, height: viewport.height, width: viewport.width });
   }
   await recoverMissingQuestions(pages);
   return pages;
+}
+
+// 公式还原可能打乱题号行。题号和分值决定切题，这一页如果比普通文字行读到的少，就退回普通文字行。
+function bestOcrRows(number, viewport, cells) {
+  const plain = rowsFromCells(cells, viewport, number);
+  if (!ocrLayouts.has(number)) return plain;
+  const rich = ocrRows(number, viewport);
+  const landmarks = (rows) => rows.reduce((sum, row) => {
+    const text = row.text.trim();
+    const heading = QUESTION_LINE.test(text) || OCR_QUESTION_LINE.test(text);
+    return sum + (heading ? 10 : 0) + (/\bmarks?\b/i.test(text) ? 1 : 0) + (/^[A-E]\.\s/.test(text) ? 1 : 0);
+  }, 0);
+  return landmarks(rich) >= landmarks(plain) ? rich : plain;
 }
 
 // OCR 偶尔整行漏掉题号。题号跳号时，把中间的页面换一种版面分析方式再读一次。
@@ -3343,7 +3867,7 @@ async function recoverMissingQuestions(pages) {
       await ocrWorker.setParameters({ tessedit_pageseg_mode: '11' });
       const cells = await ocrPageCells(number, viewport);
       await ocrWorker.setParameters({ tessedit_pageseg_mode: '3' });
-      const rows = rowsFromCells(cells, viewport, number);
+      const rows = bestOcrRows(number, viewport, cells);
       const found = (list) => list.filter((row) => QUESTION_LINE.test(row.text.trim())).length;
       if (found(rows) > found(page.rows)) {
         ocrCells.set(number, cells);
@@ -3373,8 +3897,9 @@ function parseQuestionHeading(match) {
   const rest = match[2] || '';
   const marks = /\(\s*(\d+)\s*marks?\b/i.exec(rest);
   const origin = /\((?:adapted\s+from\s+)?([^()]*\b(?:exam|sac|paper)\b[^()]*)\)/i.exec(rest);
-  const inline = rest.replace(/\([^()]*\)/g, '').trim();
-  return { marks: marks ? Number(marks[1]) : null, adapted_from: origin ? origin[1].trim() : null, inline };
+  const trailingMarks = /(\d+)\s+marks?\s*$/i.exec(rest); // “Part A | 标题 15 marks”。
+  const inline = rest.replace(/\([^()]*\)/g, '').replace(/\d+\s+marks?\s*$/i, '').trim();
+  return { marks: marks ? Number(marks[1]) : trailingMarks ? Number(trailingMarks[1]) : null, adapted_from: origin ? origin[1].trim() : null, inline };
 }
 
 // OCR 的常见误读：小问的 “a.” 读成 “a,”，“i.” 读成 “1.”，“2 marks” 粘成 “2marks”。
@@ -3403,6 +3928,8 @@ function ocrQuestionHeading(text, previous) {
 
 // 同时处理 PDF 和 Word：输入是按阅读顺序排好的行。
 function parseQuestions(rows) {
+  // 校内卷常用 “Part A: 标题” 分大题，没有 Question 编号。
+  const usesParts = !rows.some((row) => QUESTION_LINE.test(row.text.trim())) && rows.some((row) => PART_HEADING.test(row.text.trim()));
   const questions = [];
   let question = null;
   let part = null;
@@ -3448,9 +3975,15 @@ function parseQuestions(rows) {
       part = null;
       continue;
     }
-    const heading = QUESTION_LINE.exec(text) || (row.ocr ? ocrQuestionHeading(text, question) : null);
+    const partHeading = usesParts ? PART_HEADING.exec(text) : null;
+    const heading = QUESTION_LINE.exec(text) || (partHeading ? [text, partHeading[1], partHeading[2]] : null) || (row.ocr ? ocrQuestionHeading(text, question) : null);
     // OCR 读错的页眉不能算新题：题号必须往后走，或者带着分值。
     if (heading && row.ocr && question && question.section === section && Number(heading[1]) <= Number(question.question_number) && !/mark/i.test(text)) continue;
+    // 同一个 Part 的续页小标题不是新题，文字留在题干里。
+    if (partHeading && question && question.question_number === partHeading[1]) {
+      addLine(partHeading[2]);
+      continue;
+    }
     if (heading) {
       const { marks, adapted_from: adaptedFrom, inline } = parseQuestionHeading(heading);
       question = {
@@ -3479,10 +4012,11 @@ function parseQuestions(rows) {
     const only = MARKS_ONLY.exec(text);
     if (only) {
       if (part) part.marks = Number(only[1]);
+      else if (question.marks === null) question.marks = Number(only[1]); // “Part A … 15 marks” 的总分单独一行。
       continue;
     }
     // 行尾的分值属于这一行的小问，要等小问建好后再记录。
-    const trailing = row.page ? /^(.*?)\s*(\d+)\s+marks?$/i.exec(text) : null;
+    const trailing = /^(.*?)\s*(?:(\d+)\s+marks?|\[(\d+)\])$/i.exec(text); // “2 marks” 或校内卷的 “[2]”。
     if (trailing) text = trailing[1];
 
     // OCR 常把粗体的小问字母读错：只有形状接近、且正好是下一个字母时才纠正。
@@ -3520,7 +4054,7 @@ function parseQuestions(rows) {
       if (OPTION_LINE.test(text)) question.options += 1;
       addLine(text);
     }
-    if (trailing && part) part.marks = Number(trailing[2]);
+    if (trailing && part) part.marks = Number(trailing[2] || trailing[3]);
   }
   return questions;
 }
@@ -3910,6 +4444,7 @@ async function parseByRules(taxonomy) {
     paperText = `${parsed.headers.join('\n')}\n${parsed.text}`;
   } else {
     ocrCells.clear();
+    ocrLayouts.clear();
     pages = await readPdfRows((number, total) => {
       $('loaderText').textContent = `正在读取第 ${number} / ${total} 页…`;
     });
