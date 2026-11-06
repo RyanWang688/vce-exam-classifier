@@ -1365,8 +1365,6 @@ let ocrWorker = null;
 function cleanPdfText(text) {
   return text
     .replace(/([\u{1D400}-\u{1D7FF}])\1/gu, '$1') // Word 导出的公式字符常被重复一次。
-    .replace(/\u001f/g, '=') // VCAA 的公式字体把符号编码成控制字符。
-    .replace(/\u001e/g, '-')
     .replace(/[\u0000-\u0008\u000b-\u001d]/g, '')
     .normalize('NFKC')
     .replace(/\s+/g, ' ')
@@ -1413,6 +1411,1529 @@ async function pageCells(page, number, viewport) {
   return scanned;
 }
 
+/* ---------- 非 AI 模式：公式还原 ---------- */
+// PDF 里的公式只是一堆定位好的字形：分数线是单独的线段，上下标只是字号小一点、位置高一点。
+// 这里按每个字形的真实坐标还原结构，生成 LaTeX；拿不准的行标记出来，让人对照截图。
+
+// Symbol 字体的参考字形：字符、12×12 位图、上沿、下沿、左边距、宽度（后四项是字号的百分比）。
+// 公式字体常按页重新编号，同一个代码在不同页可能是 = 或 ∈，只能看字形本身。
+const SYMBOL_GLYPHS = `! 7feffffff7fe3fc3fc0f00f00600007fe7ff 68 1 11 10
+∀ 801402402404204200108108090090060060 68 0 5 61
+# 002082084084fff10c108208210210410410 68 0 2 46
+∃ fff0010010010017ff001001001001001fff 67 0 4 42
+% 60490890891090052004a009089109009206 68 1 4 76
+& 0e01101101201c01842c44c8c70c30c5978e 68 1 4 71
+∋ 7e007801e00e0073ff3ff00700e01c0787e0 47 1 3 38
+( 0060201c0780f80f00f00f807801c0030006 70 21 4 27
+) 6000c003801e01f00f00f01f01e038040600 70 21 2 27
+∗ 060060060f6f78f0f00f070ee6f060060060 54 -15 7 35
++ 060060060060060ffffff060060060060060 51 0 2 51
+, 3f87fcffe7ff1c700700700e01c0781c0e00 9 17 5 15
+− ffffffffffffffffffffffffffffffffffff 28 -23 2 51
+. 0f07fe7ff7ffffffffffffff7ff7ff7fe0f0 9 1 7 10
+/ 00300600c018030060040080100300600c00 70 1 0 28
+: 3fcfff1f80000000000000000001f8ffe3fc 47 1 8 11
+; 3fc3fc000000000000000ffcfff00703c780 47 17 7 14
+< 001006018060180600e00180060018006001 51 0 3 49
+= fffffffff000000000000000000fffffffff 36 -14 2 51
+> 800600180060018006006018060180600800 51 0 3 49
+? 3fcc0fe0760700e01c0100200000000600e0 68 1 4 35
+≅ 3815f183e000000000ffffff000000000fff 48 0 2 51
+Α 0000600600b00b00101181f820c20c404e0f 68 0 1 70
+Β 7f830630630630631c30e3073033033067fc 67 0 2 59
+Χ 7861041880d00c00600700b001810820c60e 67 0 1 70
+Δ 0200600700b009811811820c20c406406fff 67 0 1 58
+Ε 7fe3023003003043fc3043043003013027fe 67 0 2 56
+Φ 07006036c662c63c63c63c6366236c060070 67 0 3 70
+Γ 7ff301300300300300300300300300300780 67 0 2 55
+Η 70e20420420420420420420420420420470e 67 0 2 69
+Ι 1f80f00f00f00f00f00f00f00f00f00f01f8 67 0 2 29
+ϑ 1f030820c2043041040fe01f60420c2081f0 70 1 4 54
+Κ 71c2102202402803802c026027023821c71e 67 0 2 71
+Λ 0000600600a00b001011811820c20c00c60e 68 0 1 67
+Μ 60660670e70e5065964964864e6466446446 67 0 2 85
+Ν 6063003802c024026023021821c20c204780 67 1 -1 72
+Ο 0f0204606c06c03c03c03c03c026062041f0 68 1 4 65
+Π 7fe20420420420420420420420420420470e 67 0 2 73
+Θ 0f020c606c02c03cf3cf3c03c0260620c0f0 68 1 4 67
+Ρ 7f830630730730730e370300300300300780 67 0 2 50
+Σ ffe7003801c00e00600400801002017fffff 67 0 3 52
+Τ fff8610600600600600600600600600600f0 67 0 3 55
+Υ 7063043001880d00d00600600600600600e0 67 0 1 67
+ς 07e300400c008008006003fe00300100207c 47 22 3 39
+Ω 1f030c606402c03c03c02402204108811f9f 68 0 3 71
+Ξ fffc038010002043fc3fc204000000ffffff 67 0 3 58
+Ψ 8f14624624626662641f8060060060060060 68 0 2 75
+Ζ 3fe40c41c0180300600e01c0180301601ffe 67 0 1 57
+[ ffff00f00f00f00f00f00f00f00f00f00fff 69 20 8 21
+∴ 060060000000000000000000000402c03c03 50 0 18 51
+] fff00f00f00f00f00f00f00f00f00f00ffff 69 20 4 21
+⊥ 020020020020020020020020020020020fff 68 0 2 61
+_ ffffffffffffffffffffffffffffffffffff -17 22 -1 52
+α 1c622440cc1cc0cc08c18c18c184396271c6 47 1 4 56
+β 39860e60660c60c607603607706600600c00 70 21 6 44
+χ 70688c8980180700600e00e01a031131160e 47 22 3 48
+δ 1fc20e3000c003810e607e07e03e037061f0 70 1 3 43
+ε 1fc70e6066003001f8300e00e07e0770e1f8 47 1 4 36
+φ 0600600603fc666c63c6366636c060060060 70 22 3 46
+γ 70398688c04c0580500600000400c00c00c0 47 22 0 41
+η 71c946182103103103103103003003003003 47 21 2 50
+ι 060fe01e01e01e01e01e01e01e00e10f107c 47 1 3 26
+ϕ 33c666c43c43c43c4364234c040040040040 47 22 3 54
+κ 306f0e3103603403c03e036033033831c31f 47 0 1 53
+λ 3004800400400400e00e0180310310609c0e 70 1 3 49
+μ 40840840840840840860d7ce800c00c00c00 46 22 6 50
+ν 6037033033821821c40c40c8070070060000 47 1 2 47
+ο 0f030c606407c03c03c03e0360270630c0f0 47 1 4 46
+π 3ff7ffc0890810810811811831931970e60e 46 1 3 48
+θ 0f030c606606e07e07e07e0760660630c1f0 70 1 4 44
+ρ 0f820e60760360360360670c600600600e00 47 21 5 45
+σ 1ff7ff610c08c08c0cc04c04c0c60c3181f0 46 1 4 54
+τ 3ff7ff46086006006006006006206207c038 46 1 2 38
+υ c18e04e0260360360360360360230630c0f0 47 1 4 48
+ϖ 3ff7ff904a0622222262262262222230619c 46 1 3 65
+ω 198606402c63c63c63c63c43c0346242239c 47 1 4 60
+ξ 4103e020020c100400800c007fe00100103e 70 22 4 43
+ψ c0360660660620630430c188000000000000 47 22 2 64
+ζ 1821b8100200400800800c007fe00300103e 70 22 4 43
+{ 01c0600e00f00601800c00600f00e006000c 70 21 10 27
+| ffffffffffffffffffffffffffffffffffff 70 22 8 4
+} 3800600700f00600180180600f0070060300 70 21 10 27
+~ 3013817c17c17e15e187a87e83e83e81c80c 33 -18 3 49
+′ 07f1ff3ff3fe3fc7f87f07e0780f00e00c00 68 -40 6 13
+≤ 00100e0301c06006000c0038006001000fff 63 0 3 49
+⁄ 002004004008010020040080100200400800 68 1 -17 50
+∞ 01c3324a08a18610410418c18e15a031200c 47 -6 3 66
+↔ 108000204604402ffffff402604204000108 50 1 2 100
+← 100100200200400ffffff400200200100100 50 1 4 91
+↑ 0600f03bc627020020020020020020020020 91 1 4 51
+→ 008008004004006ffffff002004004008008 50 1 4 91
+↓ 0200200200200200200200206273bc0f0060 91 1 4 51
+° 1f83fc606c03c03c03c03c03c036063fc1f8 68 -37 5 29
+± 060060060060fff060060060060060000fff 63 0 2 51
+″ 38778f78f78f70e70ee1ce1cc1cc18c18810 68 -40 5 30
+≥ 8007000c003800600e0301c0600800000fff 63 0 3 49
+× 000406606108090060060090108606406000 47 -3 6 43
+∝ 00e3194b08308600600608608c04d038900e 47 -6 5 61
+∂ 07c18e003001031183700602c02c04c083e0 70 1 3 46
+• 0f03fc7fe7ffffffffffffff7ff7fe3fc0f0 47 -11 5 35
+÷ 060060060000000ffffff000000060060060 47 -4 2 51
+≠ 00c008018ffffff020040ffffff180100200 52 0 2 51
+≡ ffffff000000000ffffff000000000ffffff 43 -8 2 51
+≈ 3817c14e187a83e8083017c15e18f283e81c 44 -8 3 49
+… 801861c61c61c63c63c63c63c61c61861801 9 1 11 77
+∅ 0f130e40640a81182184188150260270c8f0 70 1 5 73
+∩ 0f030c204402000801801801801801801801 50 0 4 69
+∪ 8018018018018018018010024022041080f0 50 0 4 69
+⊃ ff800c00200300100100100100200200cff8 46 0 3 66
+⊇ ffc002003001001001002002ffc000000fff 46 15 3 66
+⊄ 0041ff6084088108108208004407400ff080 53 7 3 66
+⊂ 1ff6004008008008008008008004007001ff 46 0 3 66
+⊆ 3ff4008008008008008004003ff000000fff 46 15 3 66
+∈ 0ff380600400800ffffff8004006003800ff 46 0 14 45
+∉ 00607f388618c10fff840cc078038027f600 53 7 14 45
+∠ 001002004008010020040080100200600ffe 68 0 4 69
+∇ fff6026022043043081881900c00e0040040 68 0 4 64
+∏ 7fe206206206206206206206206206206606 74 10 2 78
+√ 0010010020020027001840c4064038018008 92 2 4 51
+⋅ 0f07fe7ff7ffffffffffffff7ff7ff7fe0f0 30 -20 7 10
+¬ ffffff001001001001001001001001001001 28 0 2 65
+∧ 0000600f0090198108108204204402c03801 46 0 3 54
+∨ 801c034022042041081081980900f0060000 46 0 3 54
+⇔ 1080003fc7fc4028018014027fc3fc000108 50 1 2 100
+⇐ 1001003ff3ff4008008004003ff3ff100100 50 1 4 91
+⇑ 06009030cf0f30c30c30c30c30c30c30c30c 91 1 4 52
+⇒ 008008ffcffc002001001002ffcffc008008 50 1 4 91
+⇓ 204204204204204204204204e07204090060 91 1 4 51
+∑ ffe6003001800c0060040080100200401fff 74 10 2 67
+⎛ 0060300c0180200600400c00800800800800 93 8 4 39
+⎜ ffffffffffffffffffffffffffffffffffff 93 8 4 4
+⎝ 800800800800c004006002001800c0030006 93 8 4 39
+⎡ fff800800800800800800800800800800800 93 8 0 34
+⎢ ffffffffffffffffffffffffffffffffffff 93 8 0 4
+⎣ 800800800800800800800800800800800fff 93 8 0 34
+⎧ 070700e00c00c00c00c00c00c00c00c00c00 93 8 21 24
+⎨ 00300300300700c1c00e000e007003003003 93 8 1 24
+⎩ c00c00c00c00c00c00c00c00c00e00700070 93 8 21 24
+⎪ ffffffffffffffffffffffffffffffffffff 93 8 21 4
+∫ 03f060060060060070070060060060020fc0 91 10 0 27
+⌠ 027186300600600e00e00e00e00e00e00e00 93 8 33 38
+⎮ ffffffffffffffffffffffffffffffffffff 97 9 33 8
+⌡ 00700700700700700700700600600c710ec0 93 8 3 39
+⎞ 6000c0030018004006002003003001001001 93 8 -4 39
+⎟ ffffffffffffffffffffffffffffffffffff 93 8 30 4
+⎠ 0010010010030030020060040180300c0600 93 8 -4 39
+⎤ fff003003003003003003003003003003003 93 8 2 34
+⎥ ffffffffffffffffffffffffffffffffffff 93 8 31 5
+⎦ 003003003003003003003003003003003fff 93 8 2 34
+⎫ 0e000e007003003003003003003003003003 93 8 1 24
+⎬ c00c00c00e00300038070700e00c00c00c00 93 8 21 24
+⎭ 00300300300300300300300300300700e0e0 93 8 1 24`;
+// Word 导出的 PDF 用 Cambria Math，它的 ToUnicode 常把不同字母标成同一个（i、n 都成 s），所以也按字形识别。
+const CAMBRIA_GLYPHS = `𝐴 00c00c0140240640440861fe106206206f0f 68 0 0 57
+𝑎 0f218c30c60c60cc0cc18c18c38c597da70c 48 1 5 49
+A 0600700700900981981081fc20c204606f0f 68 0 0 61
+a 0f871c60c00c00c03c3cc60cc0cc1cf6e7cf 48 1 4 42
+𝐵 1fe1831831831861f830c30420620c61cff0 67 0 3 57
+𝑏 1c01c01801801be347383707606606e1cbf0 70 1 5 44
+B ffc7067077077067f870c707703707706ffc 67 0 6 49
+b f0030030030037c3063073033033073062f8 70 1 2 48
+𝐶 03f1c3382300600600c00c00c00c086183f8 68 1 6 52
+𝑐 03f0c7383700700e00e00e00e00e0c7f83e0 48 1 5 39
+C 0ff303701e00e00e00e00e00e006037031ff 68 1 6 45
+c 0fe387703600e00e00e00e00e007033fe1f8 48 1 5 36
+𝐷 1f818618318310310330330620660c618fe0 67 0 3 59
+𝑑 0070020060061de30c60cc0cc18c38c5979c 70 1 5 49
+D ff060c60660760360360360360760660cff0 67 0 6 54
+d 01c00c00c00c39c60cc0cc0cc0ce0c61c3cf 70 1 5 47
+𝐸 1ff1831821801881f8318300200204608ff8 67 0 3 57
+𝑒 03e1c7383307606ff8e00e00e00e0c7f83e0 48 1 5 40
+E fff70370170070c7fc70c700700701703fff 67 0 6 46
+e 0f830c606607e07fffe00e00e007023fe1f8 48 1 5 40
+𝐹 1ff083182180188118318310300200600f00 67 0 3 56
+𝑓 01f0300601fc0600c00c0080180180300e00 70 21 -1 55
+F fff70370170070471c71c704700700700fc0 67 0 6 44
+f 07f183380380ffc380380380380380380fe0 70 0 4 32
+𝐺 03f1c3383300600600c00c0cc0cc0c6183e8 68 1 6 52
+𝑔 03d0c718218610630e30c1e40ccc08c187e0 48 21 1 54
+G 0fe306602e00c00c00c00c06c066067061fa 68 1 6 51
+g 1ff60c60c60c71c2e04007fc60ec02c063f8 48 21 3 46
+𝐻 1871861061043043fc30c20c608618618e18 67 0 3 67
+ℎ 18018018010037c38c30c60c618618c19c1c 70 1 4 50
+H f0f6066066066067fe606606606606606f0f 67 0 6 56
+h f0030030030037c30c30c30c30c30c30c79f 70 0 3 49
+𝐼 07e03c0380780700700e01e01c01c03807c0 67 0 3 32
+𝑖 01e07c0000f80f01f03e03c0780f80f077f0 67 1 7 21
+I fff1f81f81f81f81f81f81f81f81f81f87ff 67 0 6 20
+i 1f81f8000ff81f80f80f80f80f80f81f87fe 66 0 4 20
+𝐽 00e00c01c0180180300700600600e01c0f80 67 19 -8 44
+𝑗 00700000000c01c0180380300700600e0f80 67 21 -7 40
+J 1fc0f80f80f80f80f80f80f80f80f80f0f80 67 19 2 24
+j 03f00000003f03f03f03f03f03f03f07efe0 66 21 1 17
+𝐾 1871841081103203c0360220230630618e1c 67 0 3 66
+𝑘 1c018018018010730c3103e0670630632c1c 70 1 4 48
+K f0f60c6186306607c066063063861860cf0f 67 0 6 56
+k e0060060060061e6186207c067061861cf0f 70 0 3 50
+𝐿 0f00e00c00c00c0180180380300303706ffe 67 0 3 46
+𝑙 07e03e07c07c0f01f03e03e0780f80f077f0 70 1 7 21
+L f80700700700700700700700701703707fff 67 0 6 45
+l ff80f80f80f80f80f80f80f80f80f80f87fe 70 0 3 20
+𝑀 38718628a28e2942942a44a44cc4cc488c1c 67 0 3 79
+𝑚 644aeeb32332222222264644444445445446 48 1 1 81
+M e0760e70e50e5165964964e64e6446446e07 67 0 6 70
+m ccc5de662462462462462462462462462ef7 48 0 4 75
+𝑁 1871c21c2144264264224234638418418e18 67 0 3 67
+𝑛 31c5bc9c418438c30c30c30c31821961a60c 48 1 1 55
+N f0f7025824c24c246243243a41a40e40ef06 67 0 6 56
+n f386fc30c30e30630630630630630670ef9f 48 0 4 48
+𝑂 07c182303603603e03c06c06c06c0c4183e0 68 1 6 55
+𝑜 07c1c6307703603e07e07c06c0ee0c6383e0 48 1 5 43
+O 1f830e606c07c03c03c03c03e0760670c1f0 68 1 6 53
+o 0f030c60ee07e07e07e07e07e0770670c1f0 48 1 5 43
+𝑃 1fe0c31831831871861f8300300200600f00 67 0 3 54
+𝑝 39e9a71c318330630630c718660600c00e00 48 21 1 50
+P ffc70670770770670e7f8700700700700f80 67 0 6 47
+p f7c78670770370370370678e770700700f80 48 21 4 46
+𝑄 07c183303603603c06c06c0c6183c006007c 68 18 6 55
+𝑞 0ff387606606e0ec1cc1c7d8318018038038 48 21 5 44
+Q 1f060cc04c06c06c06c06e0c7180e003001e 68 19 6 58
+q 1fe60ee0ec0ec0ec0ee0e7fe18e00e00e01f 48 21 5 46
+𝑅 1fc0c318318318218c3f031831820c60cf0e 67 0 3 55
+𝑟 3875df8e21c01c0180180180300300300700 48 0 1 45
+R ff061c60c60c60c6187e063061861c60cf07 67 0 6 56
+r f8f3bf3c3380380380380380380380380fe0 48 0 4 35
+𝑆 07f1831821801800e007801c00cc0cc18fe0 68 1 1 50
+𝑠 07e1873033801c00f003801c00cc0ce187f0 48 1 3 40
+S 1ff607e03e007801f007c00f007c07e06ff8 68 1 5 40
+s 0ff707603f007803f807e00f007c07e0e7f8 48 1 4 33
+𝑇 7ffc638620400c00c00c0180180180380380 67 0 3 55
+𝑡 0600e01fffff3c0380380700700f00f1c3f0 59 1 6 31
+T fffc638610600600600600600600600600f0 67 0 3 53
+t 1c01c03fffff1c01c01c01c01c01c01e10fc 59 1 2 32
+𝑈 70720620460460460cc0cc08c18c18c307c0 67 1 8 57
+𝑢 30658698418c30c30c30c31c2182393da38c 48 1 1 55
+U f0f60660660660660660660660660630c1f8 67 1 4 56
+u e1c60c60c60c60c60c60c60c60c70c3fe1cf 47 1 4 48
+𝑉 f0f60460c6086106306202402c0280300300 67 1 5 56
+𝑣 38658b9931821821063043083183303e0180 48 1 4 49
+V f0f60630430c3081081901900900e00e0040 67 1 1 59
+v f8f70630430c3081881981900f00e00e0040 47 1 1 49
+𝑊 c234624624244a44a8528528430630620420 67 1 5 89
+𝑤 c234234634626626a46a46a4728738630610 47 1 3 69
+W e23462462462630214294294294210118108 67 0 1 91
+w e27462462662672214294294294318118108 47 0 1 76
+𝑋 1c70840cc0c80500600600b0130310618e3c 67 0 -1 65
+𝑥 1832c70c80580700600600a01b0130e34c18 48 1 2 49
+X f8f30c3881980f00600600b019831c20ef1f 67 0 1 55
+x f8f30638c1980d00600700b019830c60ef1f 47 0 1 46
+𝑌 f0f6042083103201c01c0180180100300780 67 0 5 54
+𝑦 3871830c60c40cc0c8050060040080900e00 48 21 1 53
+Y f0f70430c1881900f00e00600600600600f0 67 0 1 56
+y f8f30430c3881981900e00e00400c0980f00 47 21 1 49
+𝑍 1ff10630c0180300700e00c018030460cff8 67 0 1 56
+𝑧 1ff30630c0180380700e00c018030460cffc 47 0 1 46
+Z fffc0ec1c0180300700e01c0180303703fff 67 0 4 46
+z fffe0ec1c0380380700e01c0381383707fff 47 0 4 38
+𝛼 0e311331661c618c18c10c30c30c50f9a71c 48 1 5 53
+𝛽 03e0c31831861b030c30420c718600c00c00 70 21 1 55
+𝛾 70798618c1981901a01c0180180300300700 48 20 1 51
+𝛿 07c0830c00600f031860ce0cc0cc0cc183e0 70 1 5 48
+𝜀 07e1c73833001800f83c0600e00e0071c3f0 48 1 4 40
+𝜁 0ff008060180300600c00e003c00300300c0 68 21 4 43
+𝜂 79e1a31c338230630630660c00c01c018018 48 21 1 47
+𝜃 07c0c2183303703606606c0ec0cc184303e0 69 1 5 46
+𝜄 0780f00f01f03e03e07c0780780f82f9e3f0 47 1 4 21
+𝜅 78330f3083103603e0760670630630c1ac1c 48 1 4 48
+𝜆 0700980180080180380680c8198318618c0e 70 1 1 50
+𝜇 18618610630c30c31c60c7cd404c00c00c00 47 20 1 52
+𝜈 303d8318318618618418c1881901a00e00c0 48 1 1 48
+𝜉 0e1030180180078700c00e007c00700300c0 70 21 4 43
+𝜊 07c1c6307703603e07e07c06c0ee0c6383e0 48 1 5 43
+𝜋 3ff7ff908118118310310330230630634e18 47 1 2 56
+𝜌 03c0c3183303303306306718660400c00c00 48 21 1 50
+𝜍 07f386700e00e00e007001e00380380300c0 48 21 4 39
+𝜎 07f1ff318618608c18c18c18c18c306603c0 47 1 4 53
+𝜏 3ff7ff8600600e00c00c00c00c01c81d80e0 47 1 2 43
+𝜐 307d8318318318330330630630630c3b81e0 48 1 1 45
+𝜑 19e233663c63c63c46cc66d81e0180180180 48 21 5 57
+𝜒 1c304606c0680700600600a0120320634c38 48 19 -2 59
+𝜓 018018010e332332236226662480400c0080 70 21 1 65
+𝜔 000102202603423c63c63c63c43c42ca4738 48 1 5 63
+0 0f830e606e07e07e07e07e07e0760670e1f8 68 1 6 43
+1 0303f0c600600600600600600600600707ff 68 0 9 39
+2 3fc60740700700e01c030060180301603fff 68 0 6 41
+3 3fce06c0700600c1f001e007007007e067f8 68 1 7 40
+4 0180380580d8198318618c1b01801801803c 67 0 4 47
+5 0027fe6006006007f800e007007007c0e7f8 70 1 7 41
+6 01e0e0180700600ffee07e07e036076061f8 68 1 6 44
+7 fffc0680600c0180300300600c00c0180300 67 0 7 43
+8 1f8606e07e076063f830ee07e07e076061f8 68 1 5 45
+9 1f8606e06c07e07e077ff00600600c0381c0 68 1 5 44
++ 060060060060060ffffff060060060060060 59 3 7 60
+− ffffffffffffffffffffffffffffffffffff 31 -25 7 60
+= fffffffff000000000000000000fffffffff 42 -15 7 60
+× c03e0770e3981f00f00f019831860ec07803 55 -1 9 53
+÷ 060060060000000ffffff000000060060060 51 -5 7 60
+< 00100f0380e0380c00c003800e003800f001 59 2 7 60
+> 800e001c007001c00300301c0701c0e00800 59 2 7 60
+≤ 00101e0703c0c00f001e003c007000000fff 63 4 7 60
+≥ 8007800e001c00300f0703c0c00000000fff 63 5 7 60
+≠ 008010010fff020020040fff080080080100 57 2 7 60
+∈ 1ff380600c00c00ffffffc00c006003801ff 57 0 7 48
+∉ 00607f388c18c10fffc20c40cc07801ff300 66 8 7 50
+∞ 30c79e4328718618218618618614d279e30c 49 -8 5 74
+∑ 7ff7033811c00e00600600c0180301603fff 70 21 1 64
+∏ 7fe60660660660660660660660660660670e 70 21 4 73
+∫ 01f0300600600600600600600600400c0f80 88 21 5 47
+√ 003004004008008000e103101201a00c0040 92 4 2 70
+( 00f0e0380700e00e00e00e007003800e000f 71 22 9 30
+) f0007001c00e00700700700700e01c070f00 71 22 2 30
+[ ffff00f00f00f00f00f00f00f00f00f00fff 71 22 11 22
+] fff01f01f01f01f01f01f01f01f01f01ffff 71 22 2 22
+{ 03f1c03c01c01e03801c01e01c03c01c003f 71 22 5 30
+} fc003803803807003c038070038038038fc0 71 22 3 31
+| ffffffffffffffffffffffffffffffffffff 70 21 13 7
+, 0ff07f07f07f07f0fe0fe1f83f07c0f80400 11 14 2 14
+. ffffffffffffffffffffffffffffffffffff 11 0 5 9
+; 0ff0ff00000000000000007f07f07e1f0f80 44 14 4 14
+: fffffffff000000000000000000fffffffff 44 0 8 9
+/ 00700600c0180300700e00c0180300600e00 70 21 3 43
+± 060060060060fff060060060060060000fff 66 9 7 60
+° 1f83fc70ee07c07c03c03c07e0770e3fc1f8 68 -39 4 29
+′ 07f07f0fe0fc1fc1f83f03e03c07c0780f00 77 -46 5 16
+→ 000004004002002ffffff002002004004000 48 -8 5 73
+ℝ ff850451451251452c5d0528524534512f8f 67 0 6 68
+ℚ 1f851410a90aa0990b90a50a29c09004903e 68 19 6 67
+ℕ f8748264276252249249244a426426412e1e 67 0 6 60
+ℤ fffc328260640c8098190320260641c83fff 67 0 5 51
+ℂ 0ff343683480c80980980880c806813430ff 68 1 6 49
+∅ 0040fc71ec16c33c23c43cc3c8670e3f0200 71 9 6 51
+∩ 1f830c606c03c03c03c03c03c03c03c03c03 58 0 8 52
+∪ c03c03c03c03c03c03c03c03c0360639c1f8 58 0 8 52
+α 1c6236614c1cc1cc18c18c18c18e2c7cd386 48 1 5 51
+β 1fc606e06c0cc70c06c03c07e0ec00c00c00 70 21 8 42
+θ 1f870e606e07e07c07fffe07e0660670c1f0 70 1 6 43
+π 3ff7ff98c18c18c18c18c18c18c18c18d38e 47 1 1 56
+λ 3c04400600200600700d0190198318608e06 70 1 1 49
+μ c18c18c18c18c18c18c18f5d904c00c00c00 47 20 9 45
+σ 0ff3ff618e18c0cc0cc0cc0cc0c6186181e0 47 1 5 50
+⃗ 00001800c006003ffffff00300600c018000 78 -55 0 36`;
+const parseGlyphTable = (table) => table.split('\n').map((line) => {
+  const [ch, hex, top, bottom, left, width] = line.split(' ');
+  const bits = [...hex].flatMap((digit) => parseInt(digit, 16).toString(2).padStart(4, '0').split('').map(Number));
+  return { ch, bits, top: top / 100, bottom: bottom / 100, left: left / 100, width: width / 100 };
+});
+const GLYPH_REFS = parseGlyphTable(SYMBOL_GLYPHS);
+const CAMBRIA_REFS = parseGlyphTable(CAMBRIA_GLYPHS);
+const FIXED_GLYPHS = {
+  '\uf8e6': '⎛', '\uf8e7': '⎜', '\uf8e8': '⎝', '\uf8e9': '⎡', '\uf8ea': '⎢', '\uf8eb': '⎛', '\uf8ec': '⎜', '\uf8ed': '⎝',
+  '\uf8ee': '⎡', '\uf8ef': '⎢', '\uf8f0': '⎣', '\uf8f1': '⎧', '\uf8f2': '⎨', '\uf8f3': '⎩', '\uf8f4': '⎪', '\uf8f5': '⌡',
+  '\uf8f6': '⎞', '\uf8f7': '⎟', '\uf8f8': '⎠', '\uf8f9': '⎤', '\uf8fa': '⎥', '\uf8fb': '⎦', '\uf8fc': '⎫', '\uf8fd': '⎬', '\uf8fe': '⎭',
+  '\uf04b': '…', '\uf06f': '∘', '\uf0d1': '←', '\u0009': ' ', '\u00a0': ' ',
+};
+const UNKNOWN_GLYPH = '\ufffd';
+const ARROW_PIECE = '\u20d7'; // 向量上方的箭头，Word 用几段字形拼成。
+const isArrowPiece = (signature) => signature.bottom < -0.4 && signature.top - -signature.bottom < 0.35;
+const STACK_PIECES = {
+  '⎛': '(', '⎜': '(', '⎝': '(', '⎞': ')', '⎟': ')', '⎠': ')', '⎡': '[', '⎢': '[', '⎣': '[', '⎤': ']', '⎥': ']', '⎦': ']',
+  '⎧': '{', '⎨': '{', '⎩': '{', '⎫': '}', '⎬': '}', '⎭': '}', '⌠': '∫', '⌡': '∫', '⎮': '∫',
+};
+const STACK_ENDS = new Set('⎛⎝⎞⎠⎡⎣⎤⎦⎧⎩⎫⎭⌠⌡');
+const TEX_SYMBOLS = {
+  '−': '-', '–': '-', '×': '\\times ', '÷': '\\div ', '≤': '\\le ', '≥': '\\ge ', '≠': '\\ne ', '∈': '\\in ', '∉': '\\notin ',
+  '→': '\\to ', '←': '\\leftarrow ', '↔': '\\leftrightarrow ', '⇒': '\\Rightarrow ', '⇔': '\\Leftrightarrow ', '∞': '\\infty ',
+  '±': '\\pm ', '⋅': '\\cdot ', '•': '\\cdot ', '·': '\\cdot ', '∫': '\\int ', '∑': '\\sum ', '∏': '\\prod ', '≈': '\\approx ', '≡': '\\equiv ',
+  '∠': '\\angle ', '°': '^{\\circ}', '∪': '\\cup ', '∩': '\\cap ', '∅': '\\varnothing ', '⊂': '\\subset ', '⊆': '\\subseteq ',
+  '∂': '\\partial ', '∴': '\\therefore ', '∀': '\\forall ', '∃': '\\exists ', '∝': '\\propto ', '≅': '\\cong ', '⊥': '\\perp ', '∧': '\\wedge ', '∨': '\\vee ', '¬': '\\neg ',
+  '′': "'", '″': "''", '’': "'", '…': '\\ldots ', '{': '\\{', '}': '\\}', '%': '\\%', '$': '\\$', '#': '\\#', '&': '\\&', '_': '\\_',
+  '~': '\\sim ', '∼': '\\sim ', '\\': '\\setminus ', '∖': '\\setminus ', '∗': '*', '⁄': '/', '√': '\\surd ', '∘': '\\circ ',
+  'α': '\\alpha ', 'β': '\\beta ', 'γ': '\\gamma ', 'δ': '\\delta ', 'ε': '\\varepsilon ', 'ζ': '\\zeta ', 'η': '\\eta ', 'θ': '\\theta ',
+  'ι': '\\iota ', 'κ': '\\kappa ', 'λ': '\\lambda ', 'μ': '\\mu ', 'µ': '\\mu ', 'ν': '\\nu ', 'ξ': '\\xi ', 'ο': 'o', 'π': '\\pi ', 'ρ': '\\rho ',
+  'σ': '\\sigma ', 'ς': '\\varsigma ', 'τ': '\\tau ', 'υ': '\\upsilon ', 'φ': '\\varphi ', 'ϕ': '\\phi ', 'χ': '\\chi ', 'ψ': '\\psi ', 'ω': '\\omega ',
+  'Γ': '\\Gamma ', 'Δ': '\\Delta ', 'Θ': '\\Theta ', 'Λ': '\\Lambda ', 'Ξ': '\\Xi ', 'Π': '\\Pi ', 'Σ': '\\Sigma ', 'Φ': '\\Phi ', 'Ψ': '\\Psi ', 'Ω': '\\Omega ',
+  'ℝ': '\\mathbb{R}', 'ℤ': '\\mathbb{Z}', 'ℕ': '\\mathbb{N}', 'ℚ': '\\mathbb{Q}', 'ℂ': '\\mathbb{C}',
+};
+const TEX_FUNCTIONS = {
+  sin: '\\sin', cos: '\\cos', tan: '\\tan', sec: '\\sec', cosec: '\\operatorname{cosec}', cot: '\\cot', sinh: '\\sinh', cosh: '\\cosh', tanh: '\\tanh',
+  arcsin: '\\arcsin', arccos: '\\arccos', arctan: '\\arctan', log: '\\log', ln: '\\ln', exp: '\\exp', lim: '\\lim', max: '\\max', min: '\\min', det: '\\det',
+  Pr: '\\Pr', Var: '\\operatorname{Var}', sd: '\\operatorname{sd}', dom: '\\operatorname{dom}', ran: '\\operatorname{ran}', cis: '\\operatorname{cis}',
+  Arg: '\\operatorname{Arg}', Re: '\\operatorname{Re}', Im: '\\operatorname{Im}',
+};
+const SCRIPT_RATIO = 0.86;  // 字号小于主字号的这个比例才算上下标。
+const WORD_GAP = 0.15;      // 超过字号这个比例的空白算词间距。
+
+const isLetter = (ch) => /^[A-Za-z]{1,3}$/.test(ch); // fi、ffi 这类连字是一个字形。
+const hasChar = (set, ch) => Boolean(ch) && set.includes(ch);
+const isDelimiterChar = (ch) => hasChar('()[]{}|', ch);
+const centerX = (a) => (a.x0 + a.x1) / 2;
+const widthOf = (list) => Math.max(...list.map((a) => a.x1)) - Math.min(...list.map((a) => a.x0));
+
+// 读取绘制指令，得到每个字形的真实位置和所有细线。getTextContent 会把公式拆散、合并，顺序和字符都不可靠。
+async function readPageLayout(page, viewport) {
+  const OPS = window.pdfjsLib.OPS;
+  const multiply = (a, b) => [
+    a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5],
+  ];
+  const list = await page.getOperatorList();
+  const glyphs = [];
+  const lines = [];
+  const stack = [];
+  const drawings = [];
+  let pending = [];
+  let shapes = [];
+  let isRect = false;
+  let pendingRadical = null;
+  let pendingBracket = null;
+  const radicals = [];
+  const brackets = [];
+  let ctm = viewport.transform.slice();
+  let text = { font: null, size: 0, charSpace: 0, wordSpace: 0, hScale: 1, leading: 0, rise: 0, mode: 0 };
+  let tm = [1, 0, 0, 1, 0, 0];
+  let tlm = tm;
+  const moveText = (x, y) => { tlm = multiply(tlm, [1, 0, 0, 1, x, y]); tm = tlm; };
+  const push = () => stack.push({ ctm, text: { ...text } });
+  const pop = () => {
+    const saved = stack.pop();
+    if (saved) { ctm = saved.ctm; text = saved.text; }
+  };
+  const point = (x, y) => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
+  const boxOf = (x0, y0, x1, y1) => {
+    const [a, b] = point(x0, y0);
+    const [c, d] = point(x1, y1);
+    return { x0: Math.min(a, c), x1: Math.max(a, c), y0: Math.min(b, d), y1: Math.max(b, d) };
+  };
+  const radicalPath = (ops, coords) => {
+    const points = [];
+    let k = 0;
+    for (const op of ops) {
+      if (op === OPS.moveTo || op === OPS.lineTo) { points.push(point(coords[k], coords[k + 1])); k += 2; } else if (op === OPS.closePath) continue;
+      else return null;
+    }
+    if (points.length < 6 || points.length > 16) return null;
+    const xs = points.map((q) => q[0]);
+    const ys = points.map((q) => q[1]);
+    const left = Math.min(...xs);
+    const right = Math.max(...xs);
+    const top = Math.min(...ys);
+    const bottom = Math.max(...ys);
+    if (bottom - top < 5 || bottom - top > 80 || right - left < 5) return null;
+    const flat = points.filter((q) => q[1] <= top + 0.3);
+    const start = Math.min(...flat.map((q) => q[0]));
+    const end = Math.max(...flat.map((q) => q[0]));
+    if (end - start < 2 || end < right - 0.5 || start <= left + 1.5) return null;
+    return { x0: left, ruleX0: start, x1: right, y0: top, y1: top + 0.8, bottom, radical: true };
+  };
+  // 矩阵的方括号有时是几段 L 形多边形。
+  const bracketPath = (ops, coords) => {
+    if (ops.length < 5 || ops.length > 9 || ops.some((op) => op !== OPS.moveTo && op !== OPS.lineTo && op !== OPS.closePath)) return null;
+    const points = [];
+    for (let k = 0; k + 1 < coords.length; k += 2) points.push(point(coords[k], coords[k + 1]));
+    const xs = points.map((q) => q[0]);
+    const ys = points.map((q) => q[1]);
+    const left = Math.min(...xs);
+    const right = Math.max(...xs);
+    const top = Math.min(...ys);
+    const bottom = Math.max(...ys);
+    if (right - left < 2 || right - left > 8 || bottom - top < 5) return null;
+    const span = (edge) => {
+      const near = points.filter((q) => Math.abs(q[0] - edge) <= 0.8).map((q) => q[1]);
+      return near.length ? Math.max(...near) - Math.min(...near) : 0;
+    };
+    const opensRight = span(left) >= (bottom - top) * 0.8;
+    const opensLeft = span(right) >= (bottom - top) * 0.8;
+    if (opensRight === opensLeft) return null;
+    const foot = points.filter((q) => Math.abs(q[0] - (opensRight ? right : left)) <= 0.8).map((q) => q[1]);
+    const footY = foot.reduce((sum, y) => sum + y, 0) / (foot.length || 1);
+    const corner = bottom - top < 3 ? null : footY < (top + bottom) / 2 ? 'top' : 'bottom';
+    return { ch: opensRight ? '[' : ']', x0: left, x1: right, y0: top, y1: bottom, corner };
+  };
+  const addBox = (x0, y0, x1, y1) => {
+    const box = boxOf(x0, y0, x1, y1);
+    // 斜线属于图形，不是分数线。
+    if (Math.min(box.x1 - box.x0, box.y1 - box.y0) > 0.8 && (x0 !== x1 && y0 !== y1) && !isRect) shapes.push({ ...box, curved: true });
+    else pending.push(box);
+  };
+  const paints = new Set([OPS.stroke, OPS.closeStroke, OPS.fill, OPS.eoFill, OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke]);
+
+  list.fnArray.forEach((fn, index) => {
+    const args = list.argsArray[index];
+    switch (fn) {
+      case OPS.save: push(); break;
+      case OPS.restore: pop(); break;
+      case OPS.transform: ctm = multiply(ctm, args); break;
+      case OPS.paintFormXObjectBegin: push(); if (args[0]) ctm = multiply(ctm, args[0]); break;
+      case OPS.paintFormXObjectEnd: pop(); break;
+      case OPS.beginText: tm = [1, 0, 0, 1, 0, 0]; tlm = tm; break;
+      case OPS.setFont: text.font = args[0]; text.size = args[1]; break;
+      case OPS.setCharSpacing: text.charSpace = args[0]; break;
+      case OPS.setWordSpacing: text.wordSpace = args[0]; break;
+      case OPS.setHScale: text.hScale = args[0] / 100; break;
+      case OPS.setLeading: text.leading = args[0]; break;
+      case OPS.setTextRise: text.rise = args[0]; break;
+      case OPS.setTextRenderingMode: text.mode = args[0]; break;
+      case OPS.moveText: moveText(args[0], args[1]); break;
+      case OPS.setLeadingMoveText: text.leading = -args[1]; moveText(args[0], args[1]); break;
+      case OPS.nextLine: moveText(0, -text.leading); break;
+      case OPS.setTextMatrix: tm = (Array.isArray(args[0]) ? args[0] : args).slice(0, 6); tlm = tm; break;
+      case OPS.showText:
+      case OPS.showSpacedText: {
+        const font = page.commonObjs.get(text.font);
+        const unit = (font.fontMatrix || [0.001])[0];
+        let x = 0;
+        args[0].forEach((glyph) => {
+          if (typeof glyph === 'number') { x -= (glyph * text.size) / 1000; return; }
+          const advance = glyph.width * unit * text.size;
+          const m = multiply(multiply(ctm, tm), [1, 0, 0, 1, x * text.hScale, text.rise]);
+          if (text.mode !== 3 && Math.abs(m[1]) < 1e-3) { // 斜体符号靠剪切实现，m[2] 不为 0，只排除旋转。
+            glyphs.push({
+              unicode: glyph.unicode, fontChar: glyph.fontChar, isSpace: glyph.isSpace, font: text.font, fontName: font.name || '',
+              x0: m[4], x1: m[4] + advance * text.hScale * Math.abs(m[0]), y: m[5], size: Math.abs(m[3]) * Math.abs(text.size),
+            });
+          }
+          x += advance + (glyph.isSpace ? text.wordSpace : 0) + text.charSpace;
+        });
+        tm = multiply(tm, [1, 0, 0, 1, x * text.hScale, 0]);
+        break;
+      }
+      case OPS.constructPath: {
+        let k = 0;
+        let cx = 0;
+        let cy = 0;
+        const [ops, coords] = args;
+        const drawn = radicalPath(ops, coords);
+        if (drawn) { pendingRadical = drawn; break; }
+        const bracket = bracketPath(ops, coords);
+        if (bracket) { pendingBracket = bracket; break; }
+        ops.forEach((op) => {
+          if (op === OPS.rectangle) {
+            isRect = true;
+            addBox(coords[k], coords[k + 1], coords[k] + coords[k + 2], coords[k + 1] + coords[k + 3]);
+            isRect = false;
+            k += 4;
+          } else if (op === OPS.moveTo) {
+            cx = coords[k]; cy = coords[k + 1]; k += 2;
+          } else if (op === OPS.lineTo) {
+            addBox(cx, cy, coords[k], coords[k + 1]);
+            cx = coords[k]; cy = coords[k + 1]; k += 2;
+          } else if (op === OPS.curveTo || op === OPS.curveTo2 || op === OPS.curveTo3) {
+            const size = op === OPS.curveTo ? 6 : 4;
+            const ex = coords[k + size - 2];
+            const ey = coords[k + size - 1];
+            shapes.push({ ...boxOf(cx, cy, ex, ey), curved: true });
+            cx = ex; cy = ey; k += size;
+          }
+        });
+        break;
+      }
+      case OPS.endPath: pending = []; shapes = []; pendingRadical = null; pendingBracket = null; break;
+      case OPS.paintImageXObject:
+      case OPS.paintInlineImageXObject:
+      case OPS.paintImageMaskXObject: {
+        const [a, b] = point(0, 0);
+        const [c, d] = point(1, 1);
+        drawings.push({ x0: Math.min(a, c), x1: Math.max(a, c), y0: Math.min(b, d), y1: Math.max(b, d), curved: true });
+        break;
+      }
+      default:
+        if (paints.has(fn)) {
+          if (pendingRadical) radicals.push(pendingRadical);
+          if (pendingBracket) brackets.push(pendingBracket);
+          pendingRadical = null;
+          pendingBracket = null;
+          lines.push(...pending);
+          drawings.push(...pending, ...shapes);
+          pending = [];
+          shapes = [];
+        }
+    }
+  });
+  return {
+    glyphs,
+    rules: lines.filter((l) => l.y1 - l.y0 <= 1.6 && l.x1 - l.x0 >= 2),
+    bars: lines.filter((l) => l.x1 - l.x0 <= 1.6 && l.y1 - l.y0 >= 4),
+    radicals,
+    brackets,
+    figures: figureAreas(drawings),
+  };
+}
+
+// 图表由曲线或斜线组成；表格只有横竖线，不算。图里的坐标和标注已经在截图里，不进题干。
+function figureAreas(drawings) {
+  const areas = [];
+  drawings.forEach((shape) => {
+    let merged = { ...shape };
+    for (let i = areas.length - 1; i >= 0; i--) {
+      const area = areas[i];
+      const near = merged.x0 <= area.x1 + 8 && merged.x1 >= area.x0 - 8 && merged.y0 <= area.y1 + 8 && merged.y1 >= area.y0 - 8;
+      if (!near) continue;
+      merged = {
+        x0: Math.min(merged.x0, area.x0), x1: Math.max(merged.x1, area.x1),
+        y0: Math.min(merged.y0, area.y0), y1: Math.max(merged.y1, area.y1),
+        curved: merged.curved || area.curved,
+      };
+      areas.splice(i, 1);
+    }
+    areas.push(merged);
+  });
+  return areas.filter((a) => a.curved && a.x1 - a.x0 >= 40 && a.y1 - a.y0 >= 30);
+}
+
+function glyphSignature(font, ch) {
+  const px = 96;
+  const side = 240;
+  const canvas = document.createElement('canvas');
+  canvas.width = side;
+  canvas.height = side;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, side, side);
+  context.fillStyle = '#000';
+  context.font = `${px}px "${font}"`;
+  context.fillText(ch, 60, 140);
+  const data = context.getImageData(0, 0, side, side).data;
+  const dark = (i, j) => data[(j * side + i) * 4] < 128;
+  let top = side, bottom = -1, left = side, right = -1;
+  for (let j = 0; j < side; j++) {
+    for (let i = 0; i < side; i++) {
+      if (!dark(i, j)) continue;
+      top = Math.min(top, j); bottom = Math.max(bottom, j); left = Math.min(left, i); right = Math.max(right, i);
+    }
+  }
+  if (bottom < 0) return null;
+  const w = right - left + 1;
+  const h = bottom - top + 1;
+  const bits = [];
+  for (let v = 0; v < 12; v++) {
+    for (let u = 0; u < 12; u++) {
+      bits.push(dark(left + Math.floor(((u + 0.5) * w) / 12), top + Math.floor(((v + 0.5) * h) / 12)) ? 1 : 0);
+    }
+  }
+  return { bits, top: (140 - top) / px, bottom: (bottom + 1 - 140) / px, left: (left - 60) / px, width: w / px };
+}
+
+function matchGlyph(signature, refs, relaxed = false, hint = '') {
+  const scored = refs.map((ref) => {
+    let differ = 0;
+    for (let i = 0; i < 144; i++) if (ref.bits[i] !== signature.bits[i]) differ += 1;
+    const shape = Math.abs(ref.top - signature.top) + Math.abs(ref.bottom - signature.bottom) +
+      Math.abs(ref.width - signature.width) + Math.abs(ref.left - signature.left) * 0.5;
+    return { ch: ref.ch, score: differ / 144 + shape * 0.7 };
+  }).sort((a, b) => a.score - b.score);
+  const [best, next] = scored;
+  if (relaxed) {
+    // 上下标和大号运算符是字体里的变体，大小不同但形状相近：只比位图。
+    const shapes = refs.map((ref) => {
+      let differ = 0;
+      for (let i = 0; i < 144; i++) if (ref.bits[i] !== signature.bits[i]) differ += 1;
+      return { ch: ref.ch, score: differ / 144 };
+    }).sort((a, b) => a.score - b.score);
+    if (shapes[0].ch === hint && shapes[0].score <= 0.25) return hint;
+    return shapes[0].score <= 0.17 && shapes[1].score - shapes[0].score >= 0.05 ? shapes[0].ch : UNKNOWN_GLYPH;
+  }
+  // ⎜⎢⎟⎥⎪ 形状几乎相同，由所在括号的首尾决定，这里不算歧义。
+  const extender = (ch) => '⎜⎢⎟⎥⎪⎮'.includes(ch);
+  if (best.score > 0.22 || (best.score > 0.13 && next.score - best.score < 0.12)) return UNKNOWN_GLYPH;
+  if (next.score - best.score < 0.03 && !(extender(best.ch) && extender(next.ch))) return UNKNOWN_GLYPH;
+  return best.ch;
+}
+
+// 没有可靠 Unicode 的字形按图形识别。字体常按页重新编号，所以按字体对象区分。
+async function resolveGlyphs(glyphs) {
+  const isCambria = (glyph) => /Cambria/i.test(glyph.fontName);
+  const unknown = new Map();
+  const labels = new Map(); // 字体 + Unicode → 用到的字形，检查标注是否重复。
+  const sample = new Map(); // 每个字体一个可见字形，用来确认字体真的加载了。
+  const settle = (glyph, ch) => {
+    glyph.mathItalic = /[\u{1D400}-\u{1D7CD}ℎ]/u.test(ch);
+    glyph.ch = /[\u{1D400}-\u{1D7FF}ﬀ-ﬆℎ]/u.test(ch) ? ch.normalize('NFKC') : ch;
+  };
+  glyphs.forEach((glyph) => {
+    let ch = glyph.unicode || '';
+    const points = [...ch];
+    if (points.length === 2 && points[0] === points[1]) ch = points[0]; // Word 导出的公式字符常被重复一次。
+    glyph.clean = ch;
+    const labelKey = `${glyph.font}\n${ch}`;
+    if (!labels.has(labelKey)) labels.set(labelKey, new Set());
+    labels.get(labelKey).add(glyph.fontChar);
+    if (/^[0-9A-Za-z\u{1D400}-\u{1D7FF}]/u.test(ch) && !sample.has(glyph.font)) sample.set(glyph.font, glyph);
+    // 子集字体可能把 = 放在空格的编码上，所以空白字符也要看有没有墨迹。
+    const blank = !ch.trim() && glyph.x1 - glyph.x0 > 0.5;
+    if (isCambria(glyph)) unknown.set(`${glyph.font}\n${glyph.fontChar}`, glyph);
+    else if (FIXED_GLYPHS[ch] && !blank) settle(glyph, FIXED_GLYPHS[ch]);
+    else if (blank || /^[\u0000-\u001f\ue000-\uf8ff\ufffd]/u.test(ch)) unknown.set(`${glyph.font}\n${glyph.fontChar}`, glyph);
+    else settle(glyph, ch);
+  });
+  const found = new Map();
+  for (const [key, glyph] of unknown) {
+    try { await document.fonts.load(`96px "${glyph.font}"`, glyph.fontChar); } catch (e) { /* 下面按无法识别处理 */ }
+    const signature = glyphSignature(glyph.font, glyph.fontChar);
+    // 没有墨迹：字体正常时是空格；字体没加载时不能当空格丢掉。
+    const probe = sample.get(glyph.font);
+    const loaded = !probe || glyphSignature(probe.font, probe.fontChar);
+    const refs = isCambria(glyph) ? CAMBRIA_REFS : GLYPH_REFS;
+    let ch = signature ? matchGlyph(signature, refs) : (loaded ? ' ' : UNKNOWN_GLYPH);
+    if (ch === UNKNOWN_GLYPH && !glyph.clean.trim()) ch = ' '; // 空格的字形有时会画成缺字方框。
+    // Word 的标注只有在同一字体里不重复时才可信。
+    const visible = /^[\u0021-\u007e\u0080-\ud7ff\u{1D400}-\u{1D7FF}]/u.test(glyph.clean) && !/^[\ue000-\uf8ff\ufffd]/u.test(glyph.clean);
+    if (ch === UNKNOWN_GLYPH && visible && labels.get(`${glyph.font}\n${glyph.clean}`).size === 1) ch = glyph.clean;
+    if (ch === UNKNOWN_GLYPH && signature) ch = matchGlyph(signature, refs, true, glyph.clean);
+    if (ch === UNKNOWN_GLYPH && signature && isArrowPiece(signature)) ch = ARROW_PIECE;
+    found.set(key, ch);
+  }
+  glyphs.forEach((glyph) => {
+    if (glyph.ch === undefined) settle(glyph, found.get(`${glyph.font}\n${glyph.fontChar}`) || UNKNOWN_GLYPH);
+  });
+}
+
+function makeAtom(glyph) {
+  return {
+    ch: glyph.ch, x0: glyph.x0, x1: glyph.x1, y: glyph.y, size: glyph.size,
+    top: glyph.y - glyph.size * 0.72, bottom: glyph.y + glyph.size * 0.22,
+    italic: Boolean(glyph.mathItalic) || /Italic|Oblique/i.test(glyph.fontName),
+    bold: /Bold/i.test(glyph.fontName),
+    symbol: /Symbol|Math|Extra/i.test(glyph.fontName),
+    // 试卷的公式只用衬线和符号字体，这些字体里的内容都是普通文字。
+    prose: /Arial|Helvetica|Courier|DengXian|SimSun|Wingdings/i.test(glyph.fontName),
+  };
+}
+
+function makeBox(fields) {
+  return { box: true, ch: '', italic: false, bold: false, ...fields };
+}
+
+// 高括号由几段字形叠成。
+function mergeStacks(atoms) {
+  const pieces = atoms.filter((a) => STACK_PIECES[a.ch] || a.ch === '⎪');
+  const rest = atoms.filter((a) => !pieces.includes(a));
+  const groups = [];
+  [...pieces].sort((a, b) => a.y - b.y).forEach((piece) => {
+    const group = groups.find((g) => {
+      const last = g[g.length - 1];
+      return Math.abs(last.x0 - piece.x0) <= 1.5 && piece.y - last.y <= last.size * 1.4;
+    });
+    if (group) group.push(piece);
+    else groups.push([piece]);
+  });
+  groups.forEach((group) => {
+    const ends = group.filter((a) => STACK_ENDS.has(a.ch));
+    const family = STACK_PIECES[(ends[0] || group[0]).ch];
+    const first = group[0];
+    const last = group[group.length - 1];
+    const top = first.y - first.size * 0.75;
+    const bottom = last.y + last.size * 0.25;
+    rest.push({
+      ch: family || '(', delim: family !== '∫', stacked: true, bold: false, italic: false,
+      x0: Math.min(...group.map((a) => a.x0)), x1: Math.max(...group.map((a) => a.x1)),
+      y: (top + bottom) / 2 + first.size * 0.28, size: first.size, top, bottom,
+    });
+  });
+  return rest;
+}
+
+// 把画出来的括号段合并成一个高括号。
+function bracketAtoms(marks) {
+  const groups = [];
+  [...marks].sort((a, b) => a.y0 - b.y0).forEach((mark) => {
+    const group = [...groups].reverse().find((g) => g.ch === mark.ch && Math.abs(g.x0 - mark.x0) <= 1.5 &&
+      (mark.y0 - g.y1 <= 3 || (g.corner === 'top' && mark.corner === 'bottom' && mark.y0 - g.y1 <= 80)));
+    if (group) {
+      group.corner = mark.corner;
+      group.y1 = Math.max(group.y1, mark.y1);
+      group.x1 = Math.max(group.x1, mark.x1);
+    } else {
+      groups.push({ ...mark });
+    }
+  });
+  return groups.map((g) => ({
+    ch: g.ch, delim: true, stacked: true, bold: false, italic: false, x0: g.x0, x1: g.x1,
+    y: (g.y0 + g.y1) / 2 + 3.4, size: 12, top: g.y0, bottom: g.y1,
+  }));
+}
+
+// 帽子和波浪号是单独的字形，压在字母上方或下方。
+function applyAccents(atoms) {
+  atoms = applyArrows(atoms);
+  const removed = new Set();
+  atoms.forEach((accent) => {
+    if (!hasChar('ˆ^˜~∼', accent.ch)) return;
+    const over = 'ˆ^'.includes(accent.ch);
+    const base = atoms.find((a) => a !== accent && !removed.has(a) && (isLetter(a.ch) || TEX_SYMBOLS[a.ch]) &&
+      Math.abs(a.y - accent.y) <= a.size * 0.9 && Math.min(a.x1, accent.x1) - Math.max(a.x0, accent.x0) >= (accent.x1 - accent.x0) * 0.5);
+    if (!base || base === accent) return;
+    if (!over && accent.y <= base.y + base.size * 0.1) return;
+    base.accent = over ? '\\hat' : '\\utilde';
+    removed.add(accent);
+  });
+  return atoms.filter((a) => !removed.has(a));
+}
+
+// Word 的向量箭头：几段箭头字形和字母同基线，盖在字母上方。
+function applyArrows(atoms) {
+  const pieces = atoms.filter((a) => a.ch === ARROW_PIECE);
+  if (!pieces.length) return atoms;
+  const used = new Set();
+  const boxes = [];
+  [...pieces].sort((a, b) => a.x0 - b.x0).forEach((piece) => {
+    if (used.has(piece)) return;
+    const group = [piece];
+    pieces.forEach((other) => {
+      if (other !== piece && !used.has(other) && Math.abs(other.y - piece.y) < 1 && other.x0 - group[group.length - 1].x1 <= piece.size * 1.2 && other.x0 >= piece.x0) group.push(other);
+    });
+    const x0 = Math.min(...group.map((a) => a.x0));
+    const x1 = Math.max(...group.map((a) => a.x1));
+    const letters = atoms.filter((a) => a.ch !== ARROW_PIECE && Math.abs(a.y - piece.y) < piece.size && centerX(a) >= x0 - 1 && centerX(a) <= x1 + 1);
+    if (!letters.length) return;
+    group.forEach((a) => used.add(a));
+    letters.forEach((a) => used.add(a));
+    boxes.push(makeBox({
+      tex: `\\overrightarrow{${atomsToTex(letters)}}`, x0: Math.min(x0, ...letters.map((a) => a.x0)), x1: Math.max(x1, ...letters.map((a) => a.x1)),
+      y: piece.y, size: piece.size, top: piece.y - piece.size, bottom: piece.y + piece.size * 0.22,
+    }));
+  });
+  return atoms.filter((a) => !used.has(a)).concat(boxes);
+}
+
+function tryRadical(rule, atoms) {
+  const ruleY = (rule.y0 + rule.y1) / 2;
+  const root = atoms.find((a) => a.ch === '√' && Math.abs(a.x1 - rule.x0) <= 3.5 && ruleY >= a.y - a.size * 2.2 && ruleY <= a.y + a.size * 0.2);
+  if (!root) return null;
+  const inside = atoms.filter((a) => a !== root && centerX(a) > rule.x0 - 0.5 && centerX(a) < rule.x1 + 0.5 &&
+    a.top >= ruleY - 2 && a.top <= ruleY + a.size * 1.3);
+  if (!inside.length) return null;
+  const index = atoms.filter((a) => a !== root && a.size < root.size * 0.8 && a.x1 <= root.x0 + (root.x1 - root.x0) * 0.7 &&
+    a.x1 >= root.x0 - root.size * 0.6 && a.y < root.y - root.size * 0.1 && a.y > root.y - root.size * 1.4);
+  const degree = index.length ? `[${atomsToTex(index)}]` : '';
+  const main = inside.reduce((a, b) => (b.size > a.size ? b : a));
+  const box = makeBox({
+    tex: `\\sqrt${degree}{${atomsToTex(inside)}}`,
+    x0: Math.min(root.x0, ...index.map((a) => a.x0)), x1: rule.x1, y: main.y, size: main.size,
+    top: ruleY, bottom: Math.max(...inside.map((a) => a.bottom)),
+  });
+  return { box, used: [root, ...inside, ...index] };
+}
+
+function tryDrawnRadical(mark, atoms) {
+  const ruleY = mark.y0 + 0.4;
+  const inside = atoms.filter((a) => centerX(a) > mark.ruleX0 - 0.5 && centerX(a) < mark.x1 + 0.5 && a.top >= ruleY - 2.5 && a.top <= mark.bottom + 1);
+  if (!inside.length) return null;
+  const index = atoms.filter((a) => !inside.includes(a) && a.x1 <= mark.ruleX0 + 1 && a.x0 >= mark.x0 - 8 && a.size <= 9 && a.y <= ruleY + (mark.bottom - ruleY) * 0.6 && a.y >= ruleY);
+  const degree = index.length ? `[${atomsToTex(index)}]` : '';
+  const main = inside.reduce((a, b) => (b.size > a.size ? b : a));
+  const box = makeBox({
+    tex: `\\sqrt${degree}{${atomsToTex(inside)}}`, x0: Math.min(mark.x0, ...index.map((a) => a.x0)), x1: mark.x1, y: main.y, size: main.size,
+    top: ruleY, bottom: Math.max(mark.bottom, ...inside.map((a) => a.bottom)),
+  });
+  return { box, used: [...inside, ...index] };
+}
+
+function tryFraction(rule, atoms, bars, rules) {
+  const ruleY = (rule.y0 + rule.y1) / 2;
+  const width = rule.x1 - rule.x0;
+  if (width > 280) return null;
+  const within = (a) => centerX(a) >= rule.x0 - 1 && centerX(a) <= rule.x1 + 1;
+  const above = atoms.filter((a) => within(a) && a.bottom <= ruleY + 1.5 && a.bottom >= ruleY - a.size * 0.95);
+  const below = atoms.filter((a) => within(a) && a.top >= ruleY - 1.5 && a.top <= ruleY + a.size * 0.95);
+  if (!above.length || !below.length) return null;
+  // 分子分母的上下标离分数线更远，跟着收进来。
+  const grow = (seed, isAbove) => {
+    const set = new Set(seed);
+    const scale = Math.max(...seed.map((a) => a.size));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const edge = isAbove ? Math.min(...[...set].map((a) => a.top)) : Math.max(...[...set].map((a) => a.bottom));
+      atoms.forEach((a) => {
+        if (set.has(a) || !within(a) || a.size >= scale * SCRIPT_RATIO) return;
+        const near = isAbove ? a.bottom > edge - scale * 0.3 && a.bottom < ruleY + 1.5 : a.top < edge + scale * 0.3 && a.top > ruleY - 1.5;
+        if (near) { set.add(a); changed = true; }
+      });
+    }
+    return [...set];
+  };
+  const top = grow(above, true);
+  const bottom = grow(below, false);
+  if (Math.max(widthOf(top), widthOf(bottom)) < width * 0.55) return null;
+  // 表格线的端点连着竖线或另一段横线。
+  const touches = (x) => bars.some((b) => Math.abs(b.x0 - x) <= 1.5 && b.y0 <= ruleY + 1.5 && b.y1 >= ruleY - 1.5) ||
+    rules.some((r) => r !== rule && Math.abs((r.y0 + r.y1) / 2 - ruleY) <= 1 && (Math.abs(r.x1 - x) <= 1.5 || Math.abs(r.x0 - x) <= 1.5));
+  if (touches(rule.x0) || touches(rule.x1)) return null;
+  const size = Math.max(...top.concat(bottom).map((a) => a.size));
+  const box = makeBox({
+    tex: `\\frac{${atomsToTex(top)}}{${atomsToTex(bottom)}}`,
+    x0: rule.x0, x1: rule.x1, y: ruleY + size * 0.3, size,
+    top: Math.min(...top.map((a) => a.top)), bottom: Math.max(...bottom.map((a) => a.bottom)),
+  });
+  return { box, used: [...top, ...bottom] };
+}
+
+function tryOverline(rule, atoms) {
+  const ruleY = (rule.y0 + rule.y1) / 2;
+  const below = atoms.filter((a) => centerX(a) >= rule.x0 - 1 && centerX(a) <= rule.x1 + 1 && a.top >= ruleY - 2 && a.top <= ruleY + a.size * 0.5);
+  if (!below.length || below.length > 3 || below.some((a) => !a.italic && !a.symbol)) return null;
+  if (rule.x1 - rule.x0 > widthOf(below) + 3) return null;
+  const nothingAbove = !atoms.some((a) => centerX(a) >= rule.x0 && centerX(a) <= rule.x1 && a.bottom <= ruleY + 1 && a.bottom >= ruleY - a.size * 0.8);
+  if (!nothingAbove) return null;
+  const main = below[0];
+  const box = makeBox({
+    tex: `\\overline{${atomsToTex(below)}}`, x0: rule.x0, x1: rule.x1, y: main.y, size: main.size, top: ruleY, bottom: main.bottom,
+  });
+  return { box, used: below };
+}
+
+function applyRules(atoms, rules, bars, radicals) {
+  let list = atoms;
+  const used = new Set();
+  // 从窄到宽处理，里层的分数和根号先收起来。
+  [...rules, ...radicals].sort((a, b) => (a.x1 - a.x0) - (b.x1 - b.x0)).forEach((rule) => {
+    const hit = rule.radical ? tryDrawnRadical(rule, list) : tryRadical(rule, list) || tryFraction(rule, list, bars, rules) || tryOverline(rule, list);
+    if (!hit) return;
+    used.add(rule);
+    list = list.filter((a) => !hit.used.includes(a));
+    list.push(hit.box);
+  });
+  return drawnSymbols(list, rules.filter((rule) => !used.has(rule)), bars);
+}
+
+// MathType 有时把 = 和 − 画成细线，文字层里没有这个字符，漏掉就会改变题意。
+function drawnSymbols(atoms, rules, bars) {
+  const short = [];
+  rules.filter((r) => r.x1 - r.x0 >= 3.5 && r.x1 - r.x0 <= 11).forEach((rule) => {
+    const y = (rule.y0 + rule.y1) / 2;
+    if (!short.some((o) => Math.abs(o.x0 - rule.x0) <= 0.5 && Math.abs(o.y - y) <= 1.1)) short.push({ ...rule, y });
+  });
+  const taken = new Set();
+  const added = [];
+  // 只有夹在同一行的字符之间，才可能是运算符。
+  const neighbour = (rule, y) => {
+    const left = atoms.filter((a) => a.x1 <= rule.x0 + 1 && rule.x0 - a.x1 <= 10 && y - a.y >= -a.size * 0.1 && y - a.y <= a.size * 0.1 + a.size * 0.5 - 0 && a.y - y <= a.size * 0.65 && a.y >= y);
+    const right = atoms.filter((a) => a.x0 >= rule.x1 - 1 && a.x0 - rule.x1 <= 10 && a.y - y >= 0 && a.y - y <= a.size * 0.65);
+    const pick = [...left, ...right].sort((a, b) => Math.abs(a.y - y) - Math.abs(b.y - y));
+    return pick[0] || null;
+  };
+  short.forEach((rule, i) => {
+    if (taken.has(rule)) return;
+    const twin = short.find((o, k) => k !== i && !taken.has(o) && Math.abs(o.x0 - rule.x0) <= 1 && Math.abs(o.x1 - rule.x1) <= 1 && Math.abs(o.y - rule.y) >= 1.5 && Math.abs(o.y - rule.y) <= 5);
+    const axis = twin ? (rule.y + twin.y) / 2 : rule.y;
+    const near = neighbour(rule, axis);
+    if (!near) return;
+    taken.add(rule);
+    if (twin) taken.add(twin);
+    const cross = bars.some((b) => b.x0 >= rule.x0 && b.x1 <= rule.x1 && b.y0 <= axis && b.y1 >= axis);
+    added.push({
+      ch: twin ? '=' : cross ? '+' : '−', x0: rule.x0, x1: rule.x1, y: near.y, size: near.size,
+      top: near.y - near.size * 0.72, bottom: near.y + near.size * 0.22, italic: false, bold: false, symbol: true,
+    });
+  });
+  return atoms.concat(added);
+}
+
+// 积分和求和的上下限。
+function applyBigOperators(atoms) {
+  let list = atoms;
+  atoms.filter((a) => a.ch === '∫' || a.ch === '∑' || a.ch === '∏').forEach((op) => {
+    const integral = op.ch === '∫';
+    const mid = op.stacked ? (op.top + op.bottom) / 2 : op.y - op.size * 0.25;
+    const small = list.filter((a) => a !== op && a.size < op.size * 0.9 && Math.abs(a.y - mid) < op.size * 1.8 && Math.abs(a.y - mid) >= op.size * 0.15);
+    const pick = (group) => {
+      const sorted = group.sort((a, b) => a.x0 - b.x0);
+      if (!integral) return sorted.filter((a) => a.x1 > op.x0 - op.size * 0.6 && a.x0 < op.x1 + op.size * 0.6);
+      const out = [];
+      sorted.forEach((a) => {
+        const edge = out.length ? out[out.length - 1].x1 : op.x1 - op.size * 0.2;
+        if (a.x0 >= edge - op.size * 0.2 && a.x0 - edge <= op.size * 0.5) out.push(a);
+      });
+      return out;
+    };
+    const upper = pick(small.filter((a) => a.y < mid));
+    const lower = pick(small.filter((a) => a.y > mid));
+    if (!upper.length && !lower.length) return;
+    const used = [...upper, ...lower];
+    const lim = (group, mark) => (group.length ? `${mark}{${atomsToTex(group)}}` : '');
+    const name = TEX_SYMBOLS[op.ch].trim();
+    const opBox = makeBox({
+      tex: `${name}${lim(lower, '_')}${lim(upper, '^')}`,
+      x0: op.x0, x1: Math.max(op.x1, ...used.map((a) => a.x1)), y: op.stacked ? op.y : op.y, size: op.stacked ? op.size : Math.min(op.size, 12),
+      top: Math.min(op.top, ...used.map((a) => a.top)), bottom: Math.max(op.bottom, ...used.map((a) => a.bottom)),
+    });
+    list = list.filter((a) => a !== op && !used.includes(a));
+    list.push(opBox);
+  });
+  return list;
+}
+
+function matrixColumns(atoms) {
+  const columns = [];
+  [...atoms].sort((a, b) => a.x0 - b.x0).forEach((atom) => {
+    const last = columns[columns.length - 1];
+    if (last && atom.x0 - last.x1 <= atom.size * 0.45) last.x1 = Math.max(last.x1, atom.x1);
+    else columns.push({ x0: atom.x0, x1: atom.x1 });
+  });
+  return columns;
+}
+
+// 矩阵旁边的行标签和上方的列标签要和矩阵对齐，否则看不出哪行对应哪个。
+function matrixLabels(list, left, right, rows, columns, inner) {
+  const size = left.size;
+  const free = list.filter((a) => a !== left && a !== right && !inner.includes(a) && !a.delim);
+  const sideLabels = (isSide) => {
+    const near = free.filter((a) => a.top >= left.top - size && a.bottom <= left.bottom + size && isSide(a));
+    const perRow = rows.map((row) => near.filter((a) => Math.abs(a.y - row.y) <= size * 0.5));
+    const fits = perRow.every((group) => group.length >= 1 && group.length <= 3) && near.length === perRow.flat().length;
+    return fits ? perRow : null;
+  };
+  const stack = (groups) => `\\begin{matrix} ${groups.map((group) => atomsToTex(group)).join(' \\\\ ')} \\end{matrix}`;
+  const rightLabels = sideLabels((a) => a.x0 >= right.x1 - 1 && a.x0 - right.x1 <= size * 1.8);
+  const leftLabels = sideLabels((a) => a.x1 <= left.x0 + 1 && left.x0 - a.x1 <= size * 1.8);
+  const above = free.filter((a) => a.bottom <= left.top + 2 && left.top - a.bottom <= size * 1.5 && a.x0 >= left.x0 - size && a.x1 <= right.x1 + size);
+  const perColumn = columns.map((column) => above.filter((a) => {
+    const middle = (column.x0 + column.x1) / 2;
+    return Math.abs(centerX(a) - middle) <= Math.max((column.x1 - column.x0) / 2 + 1, size * 1.2);
+  }));
+  const usable = above.length > 0 && perColumn.every((group) => group.length >= 1) && new Set(perColumn.flat()).size === above.length;
+  const cellsOf = (column) => inner.filter((a) => centerX(a) >= column.x0 - 0.5 && centerX(a) <= column.x1 + 0.5);
+  // 用隐形的最宽内容占位，列标签才能和下面的列对齐。
+  const widest = (column) => {
+    const groups = rows.map((row) => row.atoms.filter((a) => cellsOf(column).includes(a)));
+    return atomsToTex(groups.reduce((a, b) => (widthOfList(b) > widthOfList(a) ? b : a)));
+  };
+  const header = usable
+    ? `\\begin{matrix} ${perColumn.map((group, i) => `\\overset{${atomsToTex(group)}}{\\hphantom{${widest(columns[i])}}}`).join(' & ')} \\end{matrix}`
+    : '';
+  return {
+    before: leftLabels ? stack(leftLabels) : '',
+    after: rightLabels ? stack(rightLabels) : '',
+    header,
+    used: [...(leftLabels || []).flat(), ...(rightLabels || []).flat(), ...(usable ? above : [])],
+  };
+}
+
+const widthOfList = (list) => (list.length ? widthOf(list) : 0);
+
+// 两侧高括号之间：一行是普通括号，多行是矩阵。左花括号是分段函数。
+function applyDelimiters(atoms) {
+  let list = atoms;
+  const close = { '(': ')]', '[': ']).', '{': '}' };
+  const lefts = list.filter((a) => a.delim && '([{'.includes(a.ch)).sort((a, b) => b.x0 - a.x0);
+  lefts.forEach((left) => {
+    if (!list.includes(left)) return;
+    const right = list.filter((a) => a.delim && close[left.ch].includes(a.ch) && a.x0 > left.x1 &&
+      Math.abs(a.top - left.top) <= left.size * 0.8 && Math.abs(a.bottom - left.bottom) <= left.size * 0.8)
+      .sort((a, b) => a.x0 - b.x0)[0];
+    const inRange = (a) => a !== left && a !== right && centerX(a) > left.x1 - 0.5 && (right ? centerX(a) < right.x0 + 0.5 : true) &&
+      (a.top + a.bottom) / 2 >= left.top - 1 && (a.top + a.bottom) / 2 <= left.bottom + 1;
+    const inner = list.filter(inRange);
+    if (!inner.length) return;
+    const rows = splitLines(inner);
+    let tex = null;
+    let extra = [];
+    if (rows.length === 1) {
+      const open = left.ch === '{' ? '\\{' : left.ch;
+      const shut = right ? (right.ch === '}' ? '\\}' : right.ch) : '.';
+      tex = `\\left${open} ${atomsToTex(inner)} \\right${shut}`;
+    } else if (right && left.ch !== '{') {
+      const columns = matrixColumns(inner);
+      const cell = (row, column) => atomsToTex(row.atoms.filter((a) => centerX(a) >= column.x0 - 0.5 && centerX(a) <= column.x1 + 0.5));
+      if (left.ch === '(' && rows.length === 2 && columns.length === 1) {
+        tex = `\\binom{${cell(rows[0], columns[0])}}{${cell(rows[1], columns[0])}}`;
+      } else {
+        const body = rows.map((row) => columns.map((column) => cell(row, column)).join(' & ')).join(' \\\\ ');
+        const env = left.ch === '(' ? 'pmatrix' : 'bmatrix';
+        tex = `\\begin{${env}} ${body} \\end{${env}}`;
+        const labels = matrixLabels(list, left, right, rows, columns, inner);
+        tex = `${labels.before}${labels.header ? `\\overset{${labels.header}}{${tex}}` : tex}${labels.after}`;
+        extra = labels.used;
+      }
+    } else if (!right && left.ch === '{') {
+      const body = rows.map((row) => renderRow(row.atoms)).join(' \\\\ ');
+      tex = `\\begin{cases} ${body} \\end{cases}`;
+    }
+    if (!tex) return;
+    const used = [left, ...(right ? [right] : []), ...inner, ...extra];
+    const box = makeBox({
+      tex, x0: left.x0, x1: Math.max(...used.map((a) => a.x1)), y: left.y, size: left.size,
+      top: Math.min(left.top, ...inner.map((a) => a.top)), bottom: Math.max(left.bottom, ...inner.map((a) => a.bottom)),
+    });
+    list = list.filter((a) => !used.includes(a));
+    list.push(box);
+  });
+  return list;
+}
+
+// 有完整边框的表格：按边框线把字形分进单元格。
+function tableGrids(rules, bars) {
+  const unique = (values) => values.sort((a, b) => a - b).filter((v, i, all) => !i || v - all[i - 1] > 2.5);
+  const parent = new Map();
+  const items = [...rules.map((r) => ({ ...r, kind: 'h' })), ...bars.map((b) => ({ ...b, kind: 'v' }))];
+  items.forEach((item, i) => parent.set(i, i));
+  const find = (i) => { while (parent.get(i) !== i) i = parent.get(i); return i; };
+  const touch = (a, b) => a.x0 <= b.x1 + 2 && a.x1 >= b.x0 - 2 && a.y0 <= b.y1 + 2 && a.y1 >= b.y0 - 2;
+  items.forEach((a, i) => items.forEach((b, j) => {
+    if (j > i && a.kind !== b.kind && touch(a, b)) parent.set(find(i), find(j));
+  }));
+  const groups = new Map();
+  items.forEach((item, i) => {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(item);
+  });
+  return [...groups.values()].map((group) => ({
+    xs: unique(group.filter((g) => g.kind === 'v').map((g) => (g.x0 + g.x1) / 2)),
+    ys: unique(group.filter((g) => g.kind === 'h').map((g) => (g.y0 + g.y1) / 2)),
+  })).filter((grid) => grid.xs.length >= 2 && grid.ys.length >= 2);
+}
+
+function applyTables(atoms, rules, bars, figures) {
+  let list = atoms;
+  tableGrids(rules, bars).forEach(({ xs, ys }) => {
+    // 合并单元格：这一行里没有竖线穿过的边界不算分隔，内容归到左边的格子。
+    const hasLine = (x, top, bottom) => bars.some((b) => Math.abs((b.x0 + b.x1) / 2 - x) <= 2 && b.y0 <= (top + bottom) / 2 && b.y1 >= (top + bottom) / 2);
+    const leftEdge = (c, top, bottom) => {
+      let k = c;
+      while (k > 0 && !hasLine(xs[k], top, bottom)) k -= 1;
+      return k;
+    };
+    const inside = list.filter((a) => {
+      const middle = (a.top + a.bottom) / 2;
+      return centerX(a) > xs[0] && centerX(a) < xs[xs.length - 1] && middle > ys[0] && middle < ys[ys.length - 1];
+    });
+    if (!inside.length) return; // 空的答题框。
+    // 坐标方格纸也是横竖线，但绝大多数格子是空的：当作配图，不当表格。
+    const cellCount = (xs.length - 1) * (ys.length - 1);
+    if (cellCount >= 30 && inside.length < cellCount * 0.35) {
+      figures.push({ x0: xs[0], x1: xs[xs.length - 1], y0: ys[0], y1: ys[ys.length - 1], curved: true });
+      return;
+    }
+    const body = ys.slice(1).map((bottom, r) => xs.slice(1).map((right, c) => {
+      const cell = inside.filter((a) => {
+        const middle = (a.top + a.bottom) / 2;
+        if (middle <= ys[r] || middle > bottom) return false;
+        const column = xs.findIndex((x, k) => k < xs.length - 1 && centerX(a) > x && centerX(a) <= xs[k + 1]);
+        return leftEdge(column, ys[r], bottom) === c;
+      });
+      return cell.length ? atomsToTex(cell) : '';
+    }).join(' & ')).join(' \\\\ \\hline ');
+    const box = makeBox({
+      tex: `\\begin{array}{|${'c|'.repeat(xs.length - 1)}} \\hline ${body} \\\\ \\hline \\end{array}`,
+      display: true, x0: xs[0], x1: xs[xs.length - 1], y: (ys[0] + ys[ys.length - 1]) / 2, size: 12, top: ys[0], bottom: ys[ys.length - 1],
+    });
+    list = list.filter((a) => !inside.includes(a));
+    list.push(box);
+  });
+  return list;
+}
+
+// 把字形分到行里：同一基线算一行，小字号的上下标跟着旁边的正文走。
+function splitLines(atoms) {
+  const counts = new Map();
+  atoms.forEach((a) => {
+    if (a.box) return;
+    const key = Math.round(a.size * 2) / 2;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const common = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0];
+  const mainSize = Math.max(common ? common[0] : 0, ...atoms.filter((a) => !a.box && !a.delim && !isDelimiterChar(a.ch)).map((a) => a.size));
+  const rank = (a) => (a.size < mainSize * SCRIPT_RATIO ? 2 : a.box || a.delim ? 1 : 0);
+  const order = [...atoms].sort((a, b) => rank(a) - rank(b) || b.size - a.size || a.y - b.y);
+  const lines = [];
+  const gapTo = (atom, line) => Math.min(...line.atoms.map((b) => Math.max(0, atom.x0 - b.x1, b.x0 - atom.x1)));
+  order.forEach((atom) => {
+    let best = null;
+    let bestScore = Infinity;
+    lines.forEach((line) => {
+      const distance = Math.abs(atom.y - line.y);
+      const s = line.size;
+      let fits = false;
+      if (atom.box || atom.delim) {
+        const reach = Math.max(s * 0.45, ((atom.bottom - atom.top) / 2) * 0.7);
+        fits = distance <= reach && gapTo(atom, line) <= s * 5;
+      } else if (atom.size >= s * SCRIPT_RATIO) {
+        fits = distance <= s * 0.25;
+      } else if (distance <= s * 0.1) {
+        fits = true;
+      } else if (atom.y - line.y >= -s * 0.68 && atom.y - line.y <= s * 0.45) {
+        fits = gapTo(atom, line) <= s * 0.8;
+      }
+      // 二级上标：贴着已归行的小字。
+      if (!fits && atom.size < s * SCRIPT_RATIO) {
+        fits = line.atoms.some((b) => b.size < s * SCRIPT_RATIO + 0.01 && Math.abs(atom.y - b.y) <= b.size * 0.75 &&
+          Math.max(0, atom.x0 - b.x1, b.x0 - atom.x1) <= atom.size * 0.5);
+      }
+      if (fits && distance < bestScore) { best = line; bestScore = distance; }
+    });
+    if (best) best.atoms.push(atom);
+    else lines.push({ y: atom.y, size: atom.size, atoms: [atom] });
+  });
+  return lines.sort((a, b) => a.y - b.y);
+}
+
+// 上下标并到前一个字形上。
+function buildItems(atoms) {
+  const sorted = [...atoms].sort((a, b) => a.x0 - b.x0);
+  const plain = sorted.filter((a) => !a.box && !a.delim && !isDelimiterChar(a.ch) && !hasChar('∫∑∏', a.ch));
+  const base = Math.max(...(plain.length ? plain : sorted).map((a) => a.size));
+  const main = sorted.filter((a) => a.size >= base * 0.9);
+  const ys = (main.filter((a) => !a.box && !a.delim).length ? main.filter((a) => !a.box && !a.delim) : main).map((a) => a.y).sort((a, b) => a - b);
+  const baseline = ys[Math.floor(ys.length / 2)];
+  const isScript = (a) => a.size < base * SCRIPT_RATIO && Math.abs(a.y - baseline) > base * 0.1;
+  const items = [];
+  let index = 0;
+  while (index < sorted.length) {
+    const atom = sorted[index];
+    if (!isScript(atom)) {
+      items.push({ ...atom });
+      index += 1;
+      continue;
+    }
+    const run = [];
+    while (index < sorted.length && isScript(sorted[index])) run.push(sorted[index++]);
+    const up = run.filter((a) => a.y < baseline);
+    const down = run.filter((a) => a.y >= baseline);
+    const previous = items[items.length - 1];
+    const attached = previous && run[0].x0 - previous.x1 <= base * 0.75;
+    const target = attached ? previous : { box: true, tex: '{}', ch: '', x0: run[0].x0, x1: run[0].x1, y: baseline, size: base, unsure: true };
+    if (!attached) items.push(target);
+    if (up.length) target.sup = [target.sup, atomsToTex(up)].filter(Boolean).join('');
+    if (down.length) target.sub = [target.sub, atomsToTex(down)].filter(Boolean).join('');
+    target.x1 = Math.max(target.x1, ...run.map((a) => a.x1));
+  }
+  return items;
+}
+
+const hasScript = (item) => Boolean(item.sup || item.sub);
+const ITALIC_FUNCTIONS = ['arcsin', 'arccos', 'arctan', 'cosec', 'sin', 'cos', 'tan', 'sec', 'cot', 'cis', 'log'];
+
+// 公式环境里的粗体和斜体单词（比如表头），不能逐字母排成变量。
+function styledWordAt(items, index) {
+  const first = items[index];
+  if (first.box || !isLetter(first.ch) || !(first.bold || first.italic) || first.accent) return null;
+  let end = index;
+  while (end + 1 < items.length && !items[end + 1].box && isLetter(items[end + 1].ch) && !hasScript(items[end]) &&
+    items[end + 1].bold === first.bold && items[end + 1].italic === first.italic && items[end + 1].x0 - items[end].x1 < first.size * WORD_GAP) end += 1;
+  const word = items.slice(index, end + 1).map((item) => item.ch).join('');
+  if (hasScript(items[end]) || ITALIC_FUNCTIONS.includes(word)) return null;
+  const isWord = first.bold ? word.length >= 2 : /^[A-Z][a-z]{2,}$|^[a-z]{4,}$/.test(word);
+  if (!isWord) return null;
+  return { tex: `\\text${first.bold ? 'bf' : 'it'}{${word}}`, length: end - index + 1 };
+}
+
+// 有的试卷把函数名也排成斜体：从 index 开始是否拼成函数名。
+function functionAt(items, index) {
+  for (const name of ITALIC_FUNCTIONS) {
+    const run = items.slice(index, index + name.length);
+    if (run.length < name.length || run.map((item) => item.ch).join('') !== name) continue;
+    const joined = run.every((item, k) => !item.box && item.italic && (k === run.length - 1 || !hasScript(item)) &&
+      (k === 0 || item.x0 - run[k - 1].x1 < item.size * WORD_GAP));
+    if (joined) return name;
+  }
+  return null;
+}
+const scriptTex = (item) => `${item.sub ? `_{${item.sub}}` : ''}${item.sup ? `^{${item.sup}}` : ''}`;
+
+function charTex(item) {
+  const raw = TEX_SYMBOLS[item.ch] !== undefined ? TEX_SYMBOLS[item.ch] : item.ch;
+  let tex = raw;
+  if (item.bold && /^[A-Za-z0-9]$/.test(item.ch)) tex = item.italic ? `\\boldsymbol{${raw}}` : `\\mathbf{${raw}}`;
+  if (item.accent) tex = item.accent === '\\utilde' ? `\\underset{\\sim}{${tex.trim()}}` : `\\hat{${tex.trim()}}`;
+  return tex;
+}
+
+const isRomanLetter = (item) => !item.box && isLetter(item.ch) && !item.italic && !item.bold && !item.accent;
+
+// 一串字形转成 LaTeX。keepGaps 用在分段函数里：很宽的空白分开表达式和条件。
+function itemsToTex(items) {
+  let out = '';
+  let index = 0;
+  while (index < items.length) {
+    const item = items[index];
+    const previous = items[index - 1];
+    if (previous) {
+      const gap = item.x0 - previous.x1;
+      if (gap >= item.size * 0.9) out += '\\quad ';
+      else if (gap >= item.size * 0.2 && /[0-9A-Za-z]$/.test(previous.ch || '') && /^[0-9A-Za-z]/.test(item.ch || '')) out += '\\ ';
+    }
+    const styledRun = styledWordAt(items, index);
+    if (styledRun) {
+      out += styledRun.tex;
+      index += styledRun.length;
+      continue;
+    }
+    const italicName = functionAt(items, index);
+    if (italicName) {
+      out += `${TEX_FUNCTIONS[italicName]} ${scriptTex(items[index + italicName.length - 1])}`;
+      index += italicName.length;
+      continue;
+    }
+    if (isRomanLetter(item)) {
+      let end = index;
+      while (end + 1 < items.length && isRomanLetter(items[end + 1]) && !hasScript(items[end]) &&
+        items[end + 1].x0 - items[end].x1 < item.size * WORD_GAP) end += 1;
+      const word = items.slice(index, end + 1).map((i) => i.ch).join('');
+      const last = items[end];
+      const name = TEX_FUNCTIONS[word];
+      if (name) out += `${name} `;
+      else out += word.length === 1 ? `\\mathrm{${word}}` : `\\text{${word}}`;
+      out += scriptTex(last);
+      index = end + 1;
+      continue;
+    }
+    out += (item.box ? item.tex : charTex(item)) + scriptTex(item);
+    index += 1;
+  }
+  return out;
+}
+
+function atomsToTex(atoms) {
+  const collapsed = applyDelimiters(atoms);
+  const lines = splitLines(collapsed);
+  return lines.map((line) => itemsToTex(buildItems(line.atoms))).join('\\ ');
+}
+
+// 分段函数的一行：表达式和条件之间用 & 对齐。
+function renderRow(atoms) {
+  const items = buildItems(applyDelimiters(atoms));
+  let split = -1;
+  let widest = items.length ? items[0].size * 0.7 : 0;
+  items.forEach((item, i) => {
+    if (i && item.x0 - items[i - 1].x1 > widest) { widest = item.x0 - items[i - 1].x1; split = i; }
+  });
+  const piece = (list) => {
+    const words = [];
+    list.forEach((item, i) => {
+      if (i && item.x0 - list[i - 1].x1 >= item.size * WORD_GAP && isRomanLetter(item) && isRomanLetter(list[i - 1])) words.push('\\ ');
+      words.push(itemsToTex([item]));
+    });
+    return mergeRoman(list);
+  };
+  return split > 0 ? `${piece(items.slice(0, split))} & ${piece(items.slice(split))}` : piece(items);
+}
+
+function mergeRoman(items) {
+  return itemsToTex(items);
+}
+
+const isRomanWordStart = (word) => word.filter(isRomanLetter).length >= 2;
+
+// 判断一行里哪些字形是文字、哪些是公式。
+function classifyItems(items) {
+  const words = [];
+  items.forEach((item, i) => {
+    const gap = i ? item.x0 - items[i - 1].x1 : 0;
+    const wordBreak = i && items[i - 1].ch === ')' && isRomanLetter(item);
+    if (!i || wordBreak || gap >= Math.min(item.size, items[i - 1].size) * WORD_GAP) words.push([item]);
+    else words[words.length - 1].push(item);
+  });
+  const neutral = /^[0-9.,:;!?'"’“”‘\-–—/%$_\u2011]$/;
+  words.forEach((word, wordIndex) => {
+    word.forEach((item) => { item.kind = item.prose ? 'T' : 'M'; });
+    let i = 0;
+    while (i < word.length) {
+      if (!isRomanLetter(word[i])) { i += 1; continue; }
+      let end = i;
+      while (end + 1 < word.length && isRomanLetter(word[end + 1]) && !hasScript(word[end])) end += 1;
+      const run = word.slice(i, end + 1).map((a) => a.ch).join('');
+      const next = word[end + 1];
+      const after = words[wordIndex + 1];
+      const leadsArgument = !next && after && /^[(A-Za-z0-9\u0370-\u03ff]/.test(after[0].ch || '(') && !isRomanWordStart(after);
+      const isFunction = TEX_FUNCTIONS[run] && (next || hasScript(word[end]) || leadsArgument);
+      const isWord = run.length >= 2 || (word.length <= 2 && /^[aAI]$/.test(run));
+      if (!isFunction && isWord && !hasScript(word[end])) word.slice(i, end + 1).forEach((a) => { a.kind = 'T'; });
+      i = end + 1;
+    }
+    // 斜体或粗体的完整单词是强调，不是变量相乘。
+    const styled = word.filter((a) => !a.box && isLetter(a.ch) && (a.italic || a.bold) && !hasScript(a));
+    const needed = styled.some((a) => a.bold) ? 2 : 4;
+    const spelled = styled.map((a) => a.ch).join('');
+    const boldLetters = word.filter((a) => isLetter(a.ch));
+    const boldWord = boldLetters.length >= 3 || (boldLetters.length !== 1 && !boldLetters.some((a) => a.italic));
+    if (word.every((a) => a.bold && !a.box && !hasScript(a)) && boldWord) word.forEach((a) => { a.kind = 'T'; });
+    if (!ITALIC_FUNCTIONS.includes(spelled) && /[a-z]/.test(spelled) && styled.length >= needed && styled.length >= word.filter((a) => !neutral.test(a.ch) && !hasChar('()[]', a.ch)).length && !word.some((a) => a.box || TEX_SYMBOLS[a.ch])) {
+      styled.forEach((a) => { a.kind = 'T'; });
+      word.emphasis = true;
+    }
+    // 选项和小问的编号。
+    const label = word.map((a) => a.ch).join('');
+    if (wordIndex === 0 && /^(?:[A-Ha-h]|i{1,3}|iv|v|vi{0,3})\.$/.test(label)) word.forEach((a) => { a.kind = 'T'; });
+    const hasText = word.some((a) => a.kind === 'T');
+    word.forEach((a) => {
+      if (a.kind !== 'T' && hasText && !a.box && !hasScript(a) && (neutral.test(a.ch) || hasChar('()[]', a.ch) || isRomanLetter(a))) a.kind = 'T';
+    });
+    if (!hasText && word.every((a) => neutral.test(a.ch) && !hasScript(a))) word.forEach((a) => { a.kind = 'N'; });
+  });
+  // 整句斜体时，短词也是文字。
+  if (words.filter((w) => w.emphasis).length) {
+    words.forEach((word) => {
+      if (word.length >= 2 && word.every((a) => (isLetter(a.ch) && a.italic) || hasChar('().,', a.ch))) word.forEach((a) => { a.kind = 'T'; });
+    });
+  }
+  // 公式旁边的数字算公式，文字旁边的数字算文字。
+  words.forEach((word, i) => {
+    if (word[0].kind !== 'N') return;
+    const before = words[i - 1];
+    const after = words[i + 1];
+    const touches = (w, edge) => w && w[edge === 'end' ? w.length - 1 : 0].kind === 'M';
+    const kind = touches(before, 'end') || touches(after, 'start') ? 'M' : 'T';
+    word.forEach((a) => { a.kind = kind; });
+  });
+  return words;
+}
+
+function renderLine(items) {
+  if (items.length === 1 && items[0].display) return `\\[${items[0].tex}\\]`;
+  const words = classifyItems(items);
+  const flat = words.flatMap((word, w) => word.map((item, i) => ({ item, spaced: i === 0 && w > 0 })));
+  const parts = [];
+  let math = [];
+  const flushMath = () => {
+    if (!math.length) return;
+    const tail = [];
+    while (math.length > 1 && /^[.,;:?!]$/.test(math[math.length - 1].ch || '') && !hasScript(math[math.length - 1])) tail.unshift(math.pop());
+    const tex = itemsToTex(math);
+    // 试卷里的分数和积分是正常大小，不是行内缩小版。
+    parts.push({ math: /\\frac|\\sum|\\int|\\prod/.test(tex) ? `\\displaystyle ${tex}` : tex, spaced: math[0].spacedBefore });
+    tail.forEach((item, i) => parts.push({ text: item.ch, spaced: i === 0 ? false : false }));
+    math = [];
+  };
+  flat.forEach(({ item, spaced }) => {
+    if (item.kind === 'M' || item.box || hasScript(item) || item.accent) {
+      item.spacedBefore = spaced;
+      math.push(item);
+    } else {
+      flushMath();
+      const last = parts[parts.length - 1];
+      if (last && last.text !== undefined && !spaced) last.text += item.ch;
+      else parts.push({ text: item.ch, spaced });
+    }
+  });
+  flushMath();
+  return parts.map((part, i) => `${i && part.spaced ? ' ' : ''}${part.math !== undefined ? `\\(${part.math}\\)` : part.text}`).join('');
+}
+
+function mathProblems(text) {
+  const problems = [];
+  if (text.includes(UNKNOWN_GLYPH)) problems.push('有无法识别的符号');
+  if (text.includes('\\surd')) problems.push('根号范围不确定');
+  if (typeof window.katex === 'object') {
+    (text.match(/\\[([].*?\\[)\]]/g) || []).forEach((piece) => {
+      try { window.katex.renderToString(piece.slice(2, -2), { throwOnError: true }); } catch (e) { problems.push('公式解析失败'); }
+    });
+  }
+  return problems;
+}
+
+function layoutRows(layout, viewport, number) {
+  const seen = new Set();
+  const atoms = [];
+  layout.glyphs.forEach((glyph) => {
+    if (!glyph.ch || !glyph.ch.trim()) return;
+    const key = `${glyph.ch}|${Math.round(glyph.x0 * 2)}|${Math.round(glyph.y * 2)}`; // 加粗有时靠重复绘制。
+    if (seen.has(key)) return;
+    seen.add(key);
+    atoms.push(makeAtom(glyph));
+  });
+  let list = mergeStacks(applyAccents(atoms)).concat(bracketAtoms(layout.brackets));
+  list = applyRules(list, layout.rules, layout.bars, layout.radicals);
+  list = applyBigOperators(list);
+  list = applyDelimiters(list);
+  list = applyTables(list, layout.rules, layout.bars, layout.figures);
+  const rows = [];
+  splitLines(list).forEach((line) => {
+    const items = buildItems(line.atoms);
+    // 右侧单独的分值（如 “2 marks”）要和正文分开。
+    const segments = [[]];
+    items.forEach((item, i) => {
+      if (i && item.x0 - items[i - 1].x1 >= viewport.width * 0.05) segments.push([]);
+      segments[segments.length - 1].push(item);
+    });
+    // 铺满页面的背景图不是配图，否则封面和整页文字都会被删掉。
+    const figures = layout.figures.filter((f) => (f.x1 - f.x0) * (f.y1 - f.y0) < viewport.width * viewport.height * 0.45);
+    const inFigure = (segment) => figures.some((area) => {
+      const marginX = 24;
+      const marginY = 22;
+      const left = Math.min(...segment.map((a) => a.x0));
+      const right = Math.max(...segment.map((a) => a.x1));
+      const top = Math.min(...segment.map((a) => a.top !== undefined ? a.top : a.y));
+      const bottom = Math.max(...segment.map((a) => a.bottom !== undefined ? a.bottom : a.y));
+      return left >= area.x0 - marginX && right <= area.x1 + marginX && top >= area.y0 - marginY && bottom <= area.y1 + marginY;
+    });
+    // 选项编号、小问编号和完整句子即使贴着图也要保留。
+    const kept = segments.filter((segment) => {
+      const words = segment.map((a) => a.ch || '').join('');
+      const label = /^(?:[A-Ea-h]\.|i{1,3}\.|iv\.|Question\d|\d+marks?$)/.test(words);
+      const wordy = classifyItems(segment.map((a) => ({ ...a }))).filter((word) => word.filter(isRomanLetter).length >= 2).length >= 4;
+      return label || wordy || !inFigure(segment);
+    });
+    const text = kept.map((segment) => renderLine(segment)).join(' ').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const problems = mathProblems(text);
+    if (items.some((item) => item.unsure)) problems.push('上下标没有对应的字符');
+    if (items.some((item) => item.delim)) problems.push('括号没有配对');
+    rows.push({
+      y: line.y, left: Math.min(...line.atoms.map((a) => a.x0)), top: Math.min(...line.atoms.map((a) => a.top)),
+      text, page: number, ocr: false, math_problems: problems,
+    });
+  });
+  return rows.sort((a, b) => a.y - b.y || a.left - b.left);
+}
+
+// 分类词典写的是普通文字：公式里的 LaTeX 要先还原。
+function latexToPlain(text) {
+  let out = text.replace(/\\[()[\]]/g, ' ').replace(/\\(?:begin|end)\{[^{}]*\}(?:\{[^{}]*\})?|\\hline|\\hphantom\{[^{}]*\}/g, ' ').replace(/&|\\\\/g, ' ');
+  const frac = /\\frac\{([^{}]*)\}\{([^{}]*)\}/;
+  while (frac.test(out)) out = out.replace(frac, '($1)/($2)');
+  return out
+    .replace(/\\sqrt(?:\[[^\]]*\])?\{([^{}]*)\}/g, '√($1)')
+    .replace(/\\text\{([^{}]*)\}/g, '$1')
+    .replace(/\\(?:mathrm|mathbf|operatorname)\{([^{}]*)\}/g, '$1')
+    .replace(/\\(?:left|right|quad|,|;)/g, ' ')
+    .replace(/\\ /g, ' ')
+    .replace(/\\int/g, '∫').replace(/\\sum/g, '∑').replace(/\\le\b/g, '≤').replace(/\\ge\b/g, '≥')
+    .replace(/\\times/g, '×').replace(/\\div/g, '÷').replace(/\\ne\b/g, '≠').replace(/\\in\b/g, '∈').replace(/\\infty/g, '∞')
+    .replace(/\\pi\b/g, 'π').replace(/\\theta\b/g, 'θ').replace(/\\mu\b/g, 'μ').replace(/\\sigma\b/g, 'σ')
+    .replace(/\\to\b/g, '→').replace(/\\([a-zA-Z]+)/g, '$1').replace(/_\{([^{}]*)\}/g, '_$1').replace(/\^\{([^{}]*)\}/g, '^$1');
+}
+
 async function readPdfRows(onPage = () => {}) {
   const pdf = await ensurePdf();
   const pages = [];
@@ -1420,6 +2941,17 @@ async function readPdfRows(onPage = () => {}) {
     onPage(number, pdf.numPages);
     const page = await pdf.getPage(number);
     const viewport = page.getViewport({ scale: 1 });
+    let layout = null;
+    try {
+      layout = await readPageLayout(page, viewport);
+      await resolveGlyphs(layout.glyphs);
+    } catch (e) {
+      console.warn(`第 ${number} 页的公式结构读取失败，改用普通文字`, e);
+    }
+    if (layout && layout.glyphs.filter((g) => (g.ch || '').trim()).length >= OCR_PAGE_MIN_CHARS) {
+      pages.push({ number, rows: layoutRows(layout, viewport, number), height: viewport.height, width: viewport.width });
+      continue;
+    }
     const cells = (await pageCells(page, number, viewport)).sort((a, b) => a.y - b.y);
     const rows = [];
     cells.forEach((cell) => {
@@ -1446,6 +2978,8 @@ async function readPdfRows(onPage = () => {}) {
       row.top = row.y - Math.max(...row.cells.map((cell) => cell.height));
       row.page = number;
       row.ocr = ocrCells.has(number);
+      // 这条路径没有公式结构，公式只能看截图。
+      row.math_problems = /[=+<>^/√∫]|\d\s*[a-z]\b/.test(row.text) ? ['扫描或无法解析的公式'] : [];
     });
     pages.push({ number, rows: rows.filter((row) => row.text), height: viewport.height, width: viewport.width });
   }
@@ -1551,7 +3085,7 @@ function parseQuestions(rows) {
       const { marks, adapted_from: adaptedFrom, inline } = parseQuestionHeading(heading);
       question = {
         question_number: heading[1], section, area, marks, adapted_from: adaptedFrom,
-        text: inline, sub_parts: [], options: 0, images: [],
+        text: inline, sub_parts: [], options: 0, images: [], math_problems: [...(row.math_problems || [])],
         regions: row.page ? [{ page: row.page, top: row.top }] : [],
         page: row.page || null,
       };
@@ -1560,6 +3094,7 @@ function parseQuestions(rows) {
       continue;
     }
     if (!question) continue;
+    (row.math_problems || []).forEach((problem) => question.math_problems.push(problem));
     if (row.page) {
       const region = question.regions[question.regions.length - 1];
       if (region.page !== row.page) question.regions.push({ page: row.page, top: row.top });
@@ -1935,8 +3470,8 @@ function bestTopics(text, candidates, subject) {
 // 大题各小问考的内容不同：先逐个小问判断，再按分值投票。
 function classifyByKeywords(q, paper, taxonomy) {
   const candidates = candidateTopics(taxonomy, paper, q.area);
-  const stem = q.text.toLowerCase();
-  const whole = `${stem}\n${q.sub_parts.map((p) => p.text).join('\n')}`.toLowerCase();
+  const stem = latexToPlain(q.text).toLowerCase();
+  const whole = `${stem}\n${q.sub_parts.map((p) => latexToPlain(p.text)).join('\n')}`.toLowerCase();
   const wholeBest = bestTopics(whole, candidates, paper.subject);
   if (!wholeBest.length) return { topic: OTHER_TOPIC, topic_fit: 'poor', alternative_topics: [], reason: '题面没有命中任何关键词。' };
 
@@ -1955,7 +3490,7 @@ function classifyByKeywords(q, paper, taxonomy) {
   const votes = new Map();
   scoredParts.forEach((part) => {
     // 小问自己没有命中时，沿用题干和全题的判断。
-    const own = bestTopics(part.text.toLowerCase(), candidates, paper.subject)[0];
+    const own = bestTopics(latexToPlain(part.text).toLowerCase(), candidates, paper.subject)[0];
     const topic = own ? own.topic : wholeBest[0].topic;
     part.topic = topic;
     votes.set(topic, (votes.get(topic) || 0) + part.marks);
@@ -2508,6 +4043,7 @@ function prepareQuestions(raw, taxonomy, subject) {
       page: Number.isInteger(q.page) ? q.page : null,
       adapted_from: q.adapted_from || null,
       marks_mismatch: Boolean(q.marks_mismatch),
+      math_problems: [...new Set(q.math_problems || [])],
       // Word 的目录表可能只给出 “1”，统一写法后题目 ID 才一致。
       section: /^\d+$/.test(String(q.section)) ? `Section ${q.section}` : (q.section || null),
       text: String(q.text || ''),
@@ -2557,6 +4093,7 @@ function reviewReasons(q) {
   }
   if (q.confidence < LOW_CONFIDENCE) reasons.push('题目内容可能没读准');
   if (q.marks_mismatch) reasons.push('小问分值之和与总分不一致，切题可能有误');
+  if ((q.math_problems || []).length) reasons.push(`公式请对照截图：${q.math_problems.join('、')}`);
   return reasons;
 }
 
