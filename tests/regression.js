@@ -59,6 +59,7 @@
         { n: 11, has: ['C=\\begin{bmatrix}8\\\\8\\\\20\\end{bmatrix}', 'E=\\overset'] },
       ],
     },
+    { file: '2024MM1-w.pdf', note: '扫描件：封面勘误 “Question 6, ...” 不是题；页码被 OCR 读坏的页眉要去掉', total: [8, 40], checks: [{ n: 2, lacks: ['Examination'] }, { n: 4, lacks: ['Examination'] }, { n: 6, lacks: ['Examination'] }] },
     { file: '2023specmath1-w.pdf', note: '波浪号向量、AB 箭头、导数点', total: [10, 40], checks: [{ n: 9, has: ['\\overrightarrow{AB}', '\\underset{\\sim}{\\mathrm{i}}'] }, { n: 10, has: ['\\dot{\\underset{\\sim}{\\mathrm{r}}}'] }] },
     { file: '2023MM2-w.pdf', note: 'π、括号、逗号是轮廓图形；小问 i、j 接在 h 后面；lim 下方条件', total: [25, 80], checks: [{ s: 'B', n: 3, has: ['\\lim_{x\\to-\\infty}'] }] },
     { file: '2024MM2-nht-w.pdf', note: '相邻选项的括号不能连成矩阵', total: [25, 80], checks: [{ s: 'A', n: 20, lacks: ['\\begin{bmatrix}'] }] },
@@ -88,6 +89,8 @@
     const list = await runFile(item.file);
     const marks = list.reduce((sum, q) => sum + (q.marks || 0), 0);
     if (list.length !== item.total[0] || marks !== item.total[1]) failures.push(`总数：${list.length} 题 ${marks} 分，应为 ${item.total.join(' 题 ')} 分`);
+    // 切题截图：PDF 的每道题都要有。Word 没有页面，继续用文字。
+    if (item.file.endsWith('.pdf') && list.some((q) => !q.snapshot)) failures.push('有题没有切题截图');
     if (item.flagged !== undefined && list.filter((q) => q.math_problems.length).length !== item.flagged) failures.push('待核对题数变了');
     if (item.scoredB !== undefined) {
       const count = list.filter((q) => (q.section || '').endsWith('B')).flatMap((q) => q.sub_parts.filter((p) => p.marks)).length;

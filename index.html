@@ -178,9 +178,9 @@
   .source-form label.field { margin: 0; min-width: 0; }
   .source-line { margin-bottom: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 
-  .snapshot { margin-top: 8px; }
-  .snapshot summary { font-size: 12px; font-weight: 400; color: var(--accent); }
-  .snapshot img { display: block; max-width: 100%; margin-top: 6px; border: 1px solid var(--line); }
+  .qshot { display: block; width: 100%; height: auto; margin-top: 8px; background: #fff; }
+  .extracted { margin-top: 8px; }
+  .extracted summary { font-size: 12px; font-weight: 400; color: var(--accent); }
 
   .figs { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; margin-top: 10px; }
   .fig { display: grid; gap: 6px; padding: 6px; max-width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
@@ -1383,11 +1383,11 @@ function parseResult(data) {
 
 /* ---------- 非 AI 模式：规则切题 ---------- */
 // VCE 试卷格式规整：题号、Section、小问、选项和分值都有固定写法，用规则就能解析。
-const QUESTION_LINE = /^Question\s+(\d+)\b(?!.*\bcontin)\s*(.*)$/i; // OCR 常把 continued 读成 continuec。
+const QUESTION_LINE = /^Question\s+(\d+)\b(?![,;:])(?!.*\bcontin)\s*(.*)$/i; // OCR 常把 continued 读成 continuec。
 const PART_HEADING = /^Part\s+([A-Z])\s*[:|]\s*(.*)$/;
 const SECTION_LINE = /^SECTION\s*([A-Z0-9])\b(?!.*\bcontin)/i;
 const END_LINE = /^End of (?:examination|question|section|paper|book)/i;
-const NOISE_LINE = /(?:do not write|continues on the next page|^Part\s+[A-Z]:?\s*contin|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^copyright|^©|^\d+$|turn over|^end$)/i;
+const NOISE_LINE = /(?:do not write|^\d{4}\s+VCE\b|\b\d{4}\s+VCE\b.*\bExamination\b|^\d{4}\s+[A-Z]+\s+EXAM\b|continues on the next page|^Part\s+[A-Z]:?\s*contin|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^page\s+\d+\s+of\b|^copyright|^©|^\d+$|turn over|^end$)/i;
 const MARKS_ONLY = /^(\d+)\s+marks?$/i;
 const PART_LINE = /^\(?([a-l])[.)]\s*(.*)$/;
 const ROMAN_LINE = /^\(?(iv|v?i{1,3}|v)[.)]\s*(.*)$/;
@@ -3352,6 +3352,7 @@ function layoutRows(layout, viewport, number) {
   list = applyDelimiters(list);
   list = applyTables(list, layout.rules, layout.bars, layout.figures);
   const rows = [];
+  const footers = [];
   splitLines(list).forEach((line) => {
     const items = buildItems(line.atoms);
     // 右侧单独的分值（如 “2 marks”）要和正文分开。
@@ -3377,7 +3378,10 @@ function layoutRows(layout, viewport, number) {
       const label = /^(?:[A-Ea-h]\.|i{1,3}\.|iv\.|Question\d|\d+marks?$|End|END)/.test(words);
       const wordy = classifyItems(segment.map((a) => ({ ...a }))).filter((word) => word.filter(isRomanLetter).length >= 2).length >= 3;
       const sans = segment.length >= 6 && segment.every((a) => a.prose || a.box); // “End of Section A” 这类提示。
-      return label || wordy || sans || !inFigure(segment);
+      const keep = label || wordy || sans || !inFigure(segment);
+      // 贴着图的页脚不进题干，但切图时也要涂掉。
+      if (!keep && /page\d+of\d+|^\d{4}VCE|EXAM\d|Examination\d/i.test(words)) footers.push(...segment);
+      return keep;
     });
     const text = kept.map((segment) => renderLine(segment)).join(' ').replace(/\s+/g, ' ').trim();
     if (!text) return;
@@ -3394,10 +3398,13 @@ function layoutRows(layout, viewport, number) {
     if (strayBars.some((b) => b.y0 >= lineTop - 6 && b.y1 <= lineBottom + 6)) problems.push('有没认出来的竖线');
     rows.push({
       y: line.y, left: Math.min(...line.atoms.map((a) => a.x0)), top: Math.min(...line.atoms.map((a) => a.top)),
+      right: Math.max(...line.atoms.map((a) => a.x1)), bottom: Math.max(...line.atoms.map((a) => a.bottom)),
       text, page: number, ocr: false, math_problems: problems,
     });
   });
-  return rows.sort((a, b) => a.y - b.y || a.left - b.left);
+  rows.sort((a, b) => a.y - b.y || a.left - b.left);
+  rows.pageNumbers = [...pageNumbers, ...footers]; // 切题截图时要涂掉。
+  return rows;
 }
 
 // 分类词典写的是普通文字：公式里的 LaTeX 要先还原。
@@ -3875,11 +3882,14 @@ function ocrLayoutFrom(data, canvas, viewport) {
 }
 
 function ocrRows(number, viewport) {
-  return layoutRows(ocrLayouts.get(number), viewport, number).map((row) => ({
+  const rows = layoutRows(ocrLayouts.get(number), viewport, number);
+  const marked = rows.map((row) => ({
     ...row,
     ocr: true,
     math_problems: /\\[([]/.test(row.text) ? [...row.math_problems, '图片公式请对照截图'] : row.math_problems,
   }));
+  marked.pageNumbers = rows.pageNumbers;
+  return marked;
 }
 
 // 把一页的文字块排成行。
@@ -3908,6 +3918,8 @@ function rowsFromCells(unsorted, viewport, number) {
     row.text = row.segments.map((s) => s.text).join(' ');
     row.left = row.cells[0].x;
     row.top = row.y - Math.max(...row.cells.map((cell) => cell.height));
+    row.bottom = row.y + Math.max(...row.cells.map((cell) => cell.height)) * 0.3;
+    row.right = Math.max(...row.cells.map((cell) => cell.x + cell.width));
     row.page = number;
     row.ocr = ocrCells.has(number);
     // 这条路径没有公式结构，公式只能看截图。
@@ -4086,7 +4098,8 @@ function parseQuestions(rows) {
     let text = row.text.trim().replace(/^\\\(\s*([a-l]|i{1,3}|iv|v)\.\s*\\\)\s*/, '$1. ').replace(/^\\\(\s*([a-l])\s*\\\)\.\s*/, '$1. ');
     // OCR 可能把旁边的残字读到题号前面，比如 “2a Question 6”。
     if (row.ocr) text = fixOcrLine(text.replace(/^\S{1,4}\s+(?=Question\s+\S{1,3}\s*(?:\(|$))/i, ''));
-    if (!text || /^[_\s.]+$/.test(text) || NOISE_LINE.test(text)) continue;
+    // 页脚的页码可能被转成公式，要按普通文字判断。
+    if (!text || /^[_\s.]+$/.test(text) || NOISE_LINE.test(text) || NOISE_LINE.test(latexToPlain(text).trim())) continue;
     if (END_LINE.test(text)) {
       question = null;
       part = null;
@@ -4122,6 +4135,7 @@ function parseQuestions(rows) {
     if (heading) {
       const { marks, adapted_from: adaptedFrom, inline } = parseQuestionHeading(heading);
       flushLead();
+      row.owner = true;
       question = {
         question_number: heading[1], section, area, marks, adapted_from: adaptedFrom,
         text: inline, sub_parts: [], options: 0, images: [], math_problems: [...(row.math_problems || [])],
@@ -4133,6 +4147,7 @@ function parseQuestions(rows) {
       continue;
     }
     if (!question) continue;
+    row.owner = question;
     (row.math_problems || []).forEach((problem) => question.math_problems.push(problem));
     if (row.page) {
       const region = question.regions[question.regions.length - 1];
@@ -4307,7 +4322,7 @@ function stackCanvases(canvases, maxWidth) {
     context.drawImage(c, 0, y, width, h);
     y += h + 12;
   });
-  return output.toDataURL('image/jpeg', 0.82);
+  return output.toDataURL('image/jpeg', 0.9);
 }
 
 // 封面印着题数和总分，这是独立的标准答案，切题结果可以和它核对。
@@ -4345,8 +4360,284 @@ function regionBounds(questions, pages) {
       const sameNext = next && next.regions[0].page === region.page ? next.regions[0].top : null;
       region.topRatio = Math.max(0, (region.top - 6) / page.height);
       region.bottomRatio = (!nextRegion && sameNext !== null ? sameNext - 4 : page.height * 0.95) / page.height;
+      region.cutBottom = (!nextRegion && sameNext !== null ? sameNext - 2 : page.height) / page.height;
+      // 不属于任何题的行：页眉、页脚、续页提示、Section 标题、说明文字、答题横线。切图时涂掉。
+      // 纯数字的行在页边才是页码，页面中间的是图表刻度，不能涂掉。
+      const isTick = (row) => /^[\d\s.,]+$/.test(row.text) && row.top > page.height * 0.08 && row.top < page.height * 0.93;
+      // 这一页正文的左边距。续页可能只有缩进的小问，不能拿它自己的最左边当页边。
+      region.ocrPage = (page.allRows || []).some((row) => row.ocr);
+      region.wordRows = (page.allRows || []).filter((row) => row.owner && /[a-z]/i.test(latexToPlain(row.text)))
+        .map((row) => ({ top: row.top / page.height, bottom: row.bottom / page.height, left: row.left / page.width }));
+      region.pageLeft = Math.min(...(page.allRows || []).filter((row) => row.owner).map((row) => row.left), page.width) / page.width;
+      region.noise = [...(page.allRows || []).filter((row) => !row.owner && !isTick(row)), ...((page.allRows || {}).pageNumbers || [])]
+        .map((row) => ({
+          x0: row.left !== undefined ? row.left : row.x0, x1: row.right !== undefined ? row.right : row.x1,
+          y0: row.top, y1: row.bottom,
+        }))
+        .map((box) => ({ left: box.x0 / page.width, right: box.x1 / page.width, top: box.y0 / page.height, bottom: box.y1 / page.height }));
     });
   });
+}
+
+const SNAPSHOT_GAP_PX = 14;   // 删掉空白后，段落之间留这么高。
+
+// 页面上下边距里又窄又矮的一团墨迹，可能是页码。
+function marginClusters(canvas) {
+  const { width, height } = canvas;
+  const data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, width, height).data;
+  const dark = (x, y) => {
+    const i = (y * width + x) * 4;
+    return data[i] + data[i + 1] + data[i + 2] < 480;
+  };
+  const clusters = [];
+  const scanBand = (top, bottom) => {
+    const columns = [];
+    for (let x = 0; x < width; x++) for (let y = top; y <= bottom; y++) if (dark(x, y)) { columns.push(x); break; }
+    const groups = [];
+    columns.forEach((x) => {
+      const group = groups[groups.length - 1];
+      if (group && x - group.right <= width * 0.015) group.right = x;
+      else groups.push({ left: x, right: x });
+    });
+    groups.forEach((group) => {
+      if (group.right - group.left > width * 0.05) return;
+      let low = height;
+      let high = -1;
+      for (let y = top; y <= bottom; y++) {
+        for (let x = group.left; x <= group.right; x++) {
+          if (dark(x, y)) {
+            low = Math.min(low, y);
+            high = Math.max(high, y);
+            break;
+          }
+        }
+      }
+      if (high - low <= height * 0.025) clusters.push({ left: group.left / width, right: (group.right + 1) / width, top: low / height, bottom: (high + 1) / height });
+    });
+  };
+  [[0, Math.round(height * 0.09)], [Math.round(height * 0.91), height - 1]].forEach(([from, to]) => {
+    let top = -1;
+    let blank = 0;
+    for (let y = from; y <= to; y++) {
+      let ink = false;
+      for (let x = 0; x < width && !ink; x++) ink = dark(x, y);
+      if (ink) {
+        if (top < 0) top = y;
+        blank = 0;
+      } else if (top >= 0 && ++blank > 2) {
+        scanBand(top, y - blank);
+        top = -1;
+      }
+    }
+    if (top >= 0) scanBand(top, to);
+  });
+  return clusters;
+}
+
+// OCR 常漏读页码。页码每页都在同一位置，所以找多页重复出现的小墨迹，得到页码所在的框。
+// 题目行开头的小问标号也可能重复出现在同一位置，要排除。
+async function repeatedPageMarks(pageNumbers, wordRowsByPage) {
+  const groups = [];
+  for (const number of pageNumbers) {
+    const rows = wordRowsByPage.get(number) || [];
+    marginClusters(withoutSideBars(await getPageCanvas(number))).forEach((box) => {
+      if (rows.some((row) => row.top < box.bottom && row.bottom > box.top && Math.abs(row.left - box.left) < 0.015)) return;
+      const x = (box.left + box.right) / 2;
+      const y = (box.top + box.bottom) / 2;
+      let group = groups.find((item) => Math.abs(item.x - x) <= 0.015 && Math.abs(item.y - y) <= 0.01);
+      if (!group) {
+        group = { x, y, pages: new Set(), left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+        groups.push(group);
+      }
+      group.pages.add(number);
+      group.left = Math.min(group.left, box.left);
+      group.right = Math.max(group.right, box.right);
+      group.top = Math.min(group.top, box.top);
+      group.bottom = Math.max(group.bottom, box.bottom);
+    });
+  }
+  const needed = Math.max(3, Math.ceil(pageNumbers.length * 0.3));
+  return groups.filter((group) => group.pages.size >= needed);
+}
+
+// 只擦完全落在框里的连通墨迹。页码和正文挤在一起时，正文的笔画伸出框外，不会被擦掉。
+function eraseInBox(context, width, height, box) {
+  const image = context.getImageData(0, 0, width, height);
+  const { data } = image;
+  const dark = (index) => data[index * 4] + data[index * 4 + 1] + data[index * 4 + 2] < 600;
+  const x0 = Math.max(0, Math.floor(box.left - 3));
+  const x1 = Math.min(width - 1, Math.ceil(box.right + 3));
+  const y0 = Math.max(0, Math.floor(box.top - 3));
+  const y1 = Math.min(height - 1, Math.ceil(box.bottom + 3));
+  const seen = new Set();
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const start = y * width + x;
+      if (seen.has(start) || !dark(start)) continue;
+      const stack = [start];
+      const component = [];
+      let inside = true;
+      seen.add(start);
+      while (stack.length) {
+        const at = stack.pop();
+        component.push(at);
+        const px = at % width;
+        const py = (at - px) / width;
+        if (px < x0 || px > x1 || py < y0 || py > y1) inside = false;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = px + dx;
+            const ny = py + dy;
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            const next = ny * width + nx;
+            if (!seen.has(next) && dark(next)) {
+              seen.add(next);
+              stack.push(next);
+            }
+          }
+        }
+      }
+      if (inside) component.forEach((at) => data.fill(255, at * 4, at * 4 + 3));
+    }
+  }
+  context.putImageData(image, 0, 0);
+}
+
+// 一行像素的情况：空白、一条长横线，还是有内容。
+function rowKinds(data, width, height) {
+  const kinds = new Uint8Array(height); // 0 内容，1 空白，2 横线
+  for (let y = 0; y < height; y++) {
+    let dark = 0;
+    let run = 0;
+    let longest = 0;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i] + data[i + 1] + data[i + 2] < 480) {
+        dark += 1;
+        run += 1;
+        if (run > longest) longest = run;
+      } else {
+        run = 0;
+      }
+    }
+    if (dark === 0) kinds[y] = 1;
+    else if (longest >= width * 0.22 && dark <= longest * 1.15) kinds[y] = 2; // 被涂掉一段的横线也算。
+  }
+  return kinds;
+}
+
+// 去掉答题横线和大段空白，题目内容一个像素都不动。
+function compactPiece(canvas) {
+  const { width, height } = canvas;
+  const data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, width, height).data;
+  const kinds = rowKinds(data, width, height);
+  // 横线紧贴内容时是表格边框或坐标轴，要保留。
+  const removable = new Uint8Array(height);
+  for (let y = 0; y < height; y++) {
+    if (kinds[y] === 1) removable[y] = 1;
+    if (kinds[y] === 2) {
+      const clear = (from, step) => {
+        for (let i = 0, at = from; i < 6 && at >= 0 && at < height; i++, at += step) if (kinds[at] === 0) return false;
+        return true;
+      };
+      removable[y] = clear(y - 1, -1) && clear(y + 1, 1) ? 1 : 0;
+    }
+  }
+  const keep = [];
+  let y = 0;
+  while (y < height) {
+    if (!removable[y]) { keep.push([y, y + 1]); y += 1; continue; }
+    let end = y;
+    while (end < height && removable[end]) end += 1;
+    const edge = y === 0 || end === height;
+    if (!edge) keep.push([y, y + Math.min(end - y, SNAPSHOT_GAP_PX)]);
+    y = end;
+  }
+  const total = keep.reduce((sum, [a, b]) => sum + b - a, 0);
+  if (!total) return null;
+  const output = document.createElement('canvas');
+  output.width = width;
+  output.height = total;
+  const context = output.getContext('2d');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, width, total);
+  let at = 0;
+  keep.forEach(([a, b]) => {
+    // 只有竖向有墨迹的行才需要画；空白行留白。
+    if (!(b - a > 1)) context.drawImage(canvas, 0, a, width, 1, 0, at, width, 1);
+    at += b - a;
+  });
+  return output;
+}
+
+function inkColumns(canvas) {
+  const { width, height } = canvas;
+  const data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, width, height).data;
+  let left = width;
+  let right = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i] + data[i + 1] + data[i + 2] < 480) {
+        if (x < left) left = x;
+        if (x > right) right = x;
+      }
+    }
+  }
+  return { left, right };
+}
+
+// 切题：从原卷精确裁出一道题。多页的题上下拼接。
+async function cutQuestion(regions, pageMarks) {
+  const pieces = [];
+  for (const region of regions) {
+    const clean = withoutSideBars(await getPageCanvas(region.page));
+    const y = Math.round(region.topRatio * clean.height);
+    const h = Math.round((region.cutBottom - region.topRatio) * clean.height);
+    if (h < 8) continue;
+    const piece = document.createElement('canvas');
+    piece.width = clean.width;
+    piece.height = h;
+    const context = piece.getContext('2d', { willReadFrequently: true });
+    context.drawImage(clean, 0, y, clean.width, h, 0, 0, clean.width, h);
+    context.fillStyle = '#fff';
+    (region.noise || []).forEach((box) => {
+      context.fillRect(box.left * clean.width - 6, box.top * clean.height - y - 3,
+        (box.right - box.left) * clean.width + 12, (box.bottom - box.top) * clean.height + 6);
+    });
+    if (region.ocrPage) {
+      pageMarks.forEach((box) => eraseInBox(context, piece.width, h, {
+        left: box.left * clean.width, right: box.right * clean.width,
+        top: box.top * clean.height - y, bottom: box.bottom * clean.height - y,
+      }));
+    }
+    const compact = compactPiece(piece);
+    if (compact) {
+      compact.pageLeft = region.pageLeft * clean.width;
+      pieces.push(compact);
+    }
+  }
+  if (!pieces.length) return null;
+  // 奇偶页的左边距不同，每段按所在页的左边距对齐，拼起来才整齐。
+  // 整页只有一行 “2 marks” 时，这一行不代表页边，改用其他段的页边。
+  const fallback = Math.min(...pieces.map((piece) => piece.pageLeft));
+  const bounds = pieces.map((piece) => {
+    const ink = inkColumns(piece);
+    const margin = Math.round(piece.pageLeft > piece.width * 0.3 ? fallback : piece.pageLeft);
+    return { ...ink, left: Math.min(margin, ink.left) };
+  });
+  const width = Math.max(...bounds.map((b) => b.right - b.left)) + 16;
+  const trimmed = pieces.map((piece, index) => {
+    const output = document.createElement('canvas');
+    output.width = width;
+    output.height = piece.height;
+    const context = output.getContext('2d');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, width, piece.height);
+    context.drawImage(piece, 8 - bounds[index].left, 0);
+    return output;
+  });
+  return stackCanvases(trimmed, 1300);
 }
 
 // 图上的轴名、点名和坐标被当成文字遮掉了，裁图时要把它们收回来；整行正文不算。
@@ -4377,10 +4668,12 @@ function fitFigureToLabels(block, rects, width, height) {
 
 async function attachPdfImages(questions, onProgress) {
   const inkCache = new Map();
+  const wordRowsByPage = new Map();
+  questions.forEach((q) => q.regions.filter((region) => region.ocrPage).forEach((region) => wordRowsByPage.set(region.page, region.wordRows)));
+  const pageMarks = await repeatedPageMarks([...wordRowsByPage.keys()], wordRowsByPage);
   for (let index = 0; index < questions.length; index++) {
     const q = questions[index];
     onProgress(index + 1, questions.length);
-    const pieces = [];
     q.figures = [];
     for (const region of q.regions) {
       const canvas = await getPageCanvas(region.page);
@@ -4413,20 +4706,8 @@ async function attachPdfImages(questions, onProgress) {
           description: '自动检测的配图或表格', sub_part: null,
         });
       });
-      // 整题截图：裁掉末尾的空白和答题横线。
-      const bottom = Math.min(region.bottomRatio, lastInkRatio(maps.all, region.topRatio, region.bottomRatio) + 0.012);
-      const y = Math.round(region.topRatio * canvas.height);
-      const h = Math.round((bottom - region.topRatio) * canvas.height);
-      if (h < 8) continue; // 这一页只有题号或答题横线。
-      // 奇偶页版面不同，左右保留整页，只去掉两侧的色条。
-      const inset = Math.round(canvas.width * 0.06);
-      const piece = document.createElement('canvas');
-      piece.width = canvas.width - inset * 2;
-      piece.height = h;
-      piece.getContext('2d').drawImage(canvas, inset, y, piece.width, h, 0, 0, piece.width, h);
-      pieces.push(piece);
     }
-    q.snapshot = pieces.length ? stackCanvases(pieces, 1100) : null;
+    q.snapshot = await cutQuestion(q.regions, pageMarks);
     delete q.regions;
   }
 }
@@ -4638,6 +4919,7 @@ async function parseByRules(taxonomy) {
       $('loaderText').textContent = `正在读取第 ${number} / ${total} 页…`;
     });
     paperText = pages.map((page) => page.rows.map((row) => row.text).join('\n')).join('\n');
+    pages.forEach((page) => { page.allRows = page.rows; });
     removeRepeatedRows(pages);
     rows = pages.flatMap((page) => page.rows);
   }
@@ -5408,16 +5690,17 @@ function renderCard(q) {
   if ((q.math_problems || []).length) head.append(el('span', 'tag warn', '公式需复核'));
   if (!currentProvider().rules) head.append(el('span', 'tag conf', `分类置信度 ${q.confidence.toFixed(2)}`));
   const sourceLine = el('div', 'source-line');
-  card.append(head, sourceLine, el('div', 'qtext', q.text));
+  card.append(head, sourceLine);
+  // 有切题截图时，题目以原卷截图为准；提取的文字折叠起来，继续用于分类、搜索和导出。
+  const textHost = q.snapshot ? el('details', 'extracted') : card;
   if (q.snapshot) {
-    const view = el('details', 'snapshot');
-    view.append(el('summary', '', '查看整题截图（公式以截图为准）'));
-    const image = el('img');
+    const image = el('img', 'qshot');
     image.src = q.snapshot;
-    image.alt = `第 ${q.question_number} 题截图`;
-    view.append(image);
-    card.append(view);
+    image.alt = `第 ${q.question_number} 题原卷截图`;
+    textHost.append(el('summary', '', '查看提取的文字（用于分类和搜索）'));
+    card.append(image, textHost);
   }
+  textHost.append(el('div', 'qtext', q.text));
 
   if (q.sub_parts.length) {
     const list = el('ol', 'parts');
@@ -5430,11 +5713,11 @@ function renderCard(q) {
       );
       list.append(item);
     });
-    card.append(list);
+    textHost.append(list);
   }
 
   const figureHost = el('div', 'figs');
-  card.append(figureHost);
+  textHost.append(figureHost); // 配图已经在截图里，单独的图放进折叠区，需要时再看。
 
   const update = (field) => (value) => {
     q[field] = value;
