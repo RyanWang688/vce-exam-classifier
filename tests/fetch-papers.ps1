@@ -2,7 +2,7 @@
 $target = Join-Path $PSScriptRoot '..\tmp-fixtures\vcaa'
 New-Item -ItemType Directory -Force $target | Out-Null
 $base = 'https://www.vcaa.vic.edu.au/sites/default/files/Documents/exams/mathematics'
-foreach ($path in '2023/2023specmath1-w', '2023/2023MM2-w', '2024/NHT/2024MM2-nht-w', '2024/2024MM1-w') {
+foreach ($path in '2023/2023specmath1-w', '2023/2023MM2-w', '2024/NHT/2024MM2-nht-w', '2024/2024MM1-w', '2023/2023genmath1-w', '2024/2024GeneralMaths1-w') {
   $name = Split-Path $path -Leaf
   Invoke-WebRequest -UseBasicParsing -OutFile (Join-Path $target "$name.pdf") "$base/$path.pdf"
 }

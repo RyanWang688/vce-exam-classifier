@@ -60,6 +60,8 @@
       ],
     },
     { file: '2024MM1-w.pdf', note: '扫描件：封面勘误 “Question 6, ...” 不是题；页码被 OCR 读坏的页眉要去掉', total: [8, 40], checks: [{ n: 2, lacks: ['Examination'] }, { n: 4, lacks: ['Examination'] }, { n: 6, lacks: ['Examination'] }] },
+    { file: '2023genmath1-w.pdf', note: '多题共用材料要进每道相关题；页面有灰色细框', total: [40, 40], checks: [{ n: 8, has: ['Use the following information to answer Questions 7 and 8'], topic: 'Investigating and modelling linear associations' }] },
+    { file: '2024GeneralMaths1-w.pdf', note: '扫描件：结束标记读坏，最后一题不能带上版权行和公式表', scan: true, total: [40, 40], checks: [{ n: 40, lacks: ['Formula', 'Victorian'] }] },
     { file: '2023specmath1-w.pdf', note: '波浪号向量、AB 箭头、导数点', total: [10, 40], checks: [{ n: 9, has: ['\\overrightarrow{AB}', '\\underset{\\sim}{\\mathrm{i}}'] }, { n: 10, has: ['\\dot{\\underset{\\sim}{\\mathrm{r}}}'] }] },
     { file: '2023MM2-w.pdf', note: 'π、括号、逗号是轮廓图形；小问 i、j 接在 h 后面；lim 下方条件', total: [25, 80], checks: [{ s: 'B', n: 3, has: ['\\lim_{x\\to-\\infty}'] }] },
     { file: '2024MM2-nht-w.pdf', note: '相邻选项的括号不能连成矩阵', total: [25, 80], checks: [{ s: 'A', n: 20, lacks: ['\\begin{bmatrix}'] }] },
@@ -97,7 +99,8 @@
       if (count !== item.scoredB) failures.push(`B 区计分小问 ${count}，应为 ${item.scoredB}`);
     }
     if (item.figures !== undefined && list.reduce((sum, q) => sum + (q.figures || []).length, 0) !== item.figures) failures.push('配图数量变了');
-    list.forEach((q) => [q.text, ...q.sub_parts.map((p) => p.text)].forEach((text) => (text.match(/\\\[.*?\\\]|\\\(.*?\\\)/gs) || []).forEach((piece) => {
+    // 扫描件的题目看裁图，OCR 还原的公式不显示，不要求能渲染。
+    if (!item.scan) list.forEach((q) => [q.text, ...q.sub_parts.map((p) => p.text)].forEach((text) => (text.match(/\\\[.*?\\\]|\\\(.*?\\\)/gs) || []).forEach((piece) => {
       try { window.katex.renderToString(piece.slice(2, -2), { throwOnError: true }); } catch (e) { failures.push(`Q${q.question_number} 公式解析失败：${piece.slice(0, 50)}`); }
     })));
     item.checks.forEach((check) => {

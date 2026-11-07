@@ -179,8 +179,12 @@
   .source-line { margin-bottom: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 
   .qshot { display: block; width: 100%; height: auto; margin-top: 8px; background: #fff; }
-  .extracted { margin-top: 8px; }
-  .extracted summary { font-size: 12px; font-weight: 400; color: var(--accent); }
+  .bank { margin-bottom: 12px; padding: 12px 16px; }
+  .bank-table th { white-space: nowrap; }
+  .bank summary { font-weight: 600; cursor: pointer; }
+  .bank-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .bank-table th, .bank-table td { text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line, #ddd); }
+  .bank-table td.num, .bank-table th.num { text-align: right; }
 
   .figs { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; margin-top: 10px; }
   .fig { display: grid; gap: 6px; padding: 6px; max-width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
@@ -310,6 +314,16 @@
         <span class="hint" id="costNote"></span>
       </div>
     </div>
+
+    <details id="bank" class="panel bank" hidden>
+      <summary id="bankTitle"></summary>
+      <div id="bankBody"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="bankJson" type="button">导出题库 JSON</button>
+        <button id="bankCsv" type="button">导出题库 CSV</button>
+        <button id="bankClear" type="button">清空题库</button>
+      </div>
+    </details>
 
     <div id="result" hidden>
       <div class="panel summary" style="margin-bottom:12px">
@@ -1386,8 +1400,10 @@ function parseResult(data) {
 const QUESTION_LINE = /^Question\s+(\d+)\b(?![,;:])(?!.*\bcontin)\s*(.*)$/i; // OCR 常把 continued 读成 continuec。
 const PART_HEADING = /^Part\s+([A-Z])\s*[:|]\s*(.*)$/;
 const SECTION_LINE = /^SECTION\s*([A-Z0-9])\b(?!.*\bcontin)/i;
-const END_LINE = /^End of (?:examination|question|section|paper|book)/i;
+const END_LINE = /^End of (?:examination|question|multiple|section|paper|book)/i;
 const NOISE_LINE = /(?:do not write|^\d{4}\s+VCE\b|\b\d{4}\s+VCE\b.*\bExamination\b|^\d{4}\s+[A-Z]+\s+EXAM\b|continues on the next page|^Part\s+[A-Z]:?\s*contin|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^page\s+\d+\s+of\b|^copyright|^©|^\d+$|turn over|^end$)/i;
+// 多道题共用一段材料：“Use the following information to answer Questions 1 and 2.”
+const SHARED_LINE = /^(?:Use the|The) following\b.*\bQuestions?\s+(\S+?)(?:\s*(?:and|to|,|[-–—])\s*(\S+?))?[.\s]*$/i;
 const MARKS_ONLY = /^(\d+)\s+marks?$/i;
 const PART_LINE = /^\(?([a-l])[.)]\s*(.*)$/;
 const ROMAN_LINE = /^\(?(iv|v?i{1,3}|v)[.)]\s*(.*)$/;
@@ -1431,10 +1447,39 @@ function withoutSideBars(canvas) {
     return dark / (height / 3) > 0.35;
   };
   const band = Math.round(width * 0.14);
+  // 粗的是竖条。细线要看外侧：外侧没有墨迹的是页框，外侧有字的是表格线，不能涂，否则正文会被一起涂掉。
+  const thick = Math.max(3, Math.round(width * 0.012));
+  const inkLimit = (height / 3) * 0.01;
+  const columnInk = (x, limit = 480) => {
+    let ink = 0;
+    for (let y = 0; y < height; y += 3) {
+      const i = (y * width + x) * 4;
+      if (data[i] + data[i + 1] + data[i + 2] < limit) ink += 1;
+    }
+    return ink;
+  };
+  const scan = (from, step, mark) => {
+    let run = 0;
+    let outside = 0;
+    for (let x = from, n = 0; n < band; x += step, n++) {
+      const solid = isBar(x);
+      // 有的卷子正文外有一圈灰色细框，颜色浅，缩小后更浅，但几乎贯穿整页。
+      if (solid || columnInk(x, 690) / (height / 3) > 0.6) {
+        run = solid ? run + 1 : 0;
+        if (run >= thick || outside <= inkLimit) {
+          mark(x);
+          outside = 0;
+        }
+      } else {
+        run = 0;
+        outside += columnInk(x);
+      }
+    }
+  };
   let left = 0;
-  for (let x = 0; x < band; x++) if (isBar(x)) left = x + 1;
+  scan(0, 1, (x) => { left = x + 1; });
   let right = width;
-  for (let x = width - 1; x >= width - band; x--) if (isBar(x)) right = x;
+  scan(width - 1, -1, (x) => { right = x; });
   if (!left && right === width) return canvas;
   const copy = document.createElement('canvas');
   copy.width = canvas.width;
@@ -3959,11 +4004,33 @@ async function readPdfRows(onPage = () => {}) {
     } else {
       unsorted = await pageCells(page, number, viewport);
     }
-    const scannedRows = bestOcrRows(number, viewport, unsorted);
+    const scannedRows = attachPlainWords(bestOcrRows(number, viewport, unsorted), unsorted);
     pages.push({ number, rows: scannedRows, height: viewport.height, width: viewport.width });
   }
   await recoverMissingQuestions(pages);
   return pages;
+}
+
+// 公式还原后的扫描件文字很乱，分类要用 Tesseract 的原文。把每个词放回它所在的行。
+function attachPlainWords(rows, cells) {
+  const lists = rows.map(() => []);
+  cells.forEach((cell) => {
+    const middle = cell.y - cell.height / 2;
+    let best = -1;
+    let distance = Infinity;
+    rows.forEach((row, index) => {
+      const gap = middle < row.top ? row.top - middle : (middle > row.bottom ? middle - row.bottom : 0);
+      if (gap < distance) {
+        distance = gap;
+        best = index;
+      }
+    });
+    if (best >= 0 && distance <= cell.height) lists[best].push(cell);
+  });
+  rows.forEach((row, index) => {
+    row.plain = lists[index].sort((a, b) => a.x - b.x).map((cell) => cell.text.trim()).join(' ');
+  });
+  return rows;
 }
 
 // 公式还原可能打乱题号行。题号和分值决定切题，这一页如果比普通文字行读到的少，就退回普通文字行。
@@ -4049,6 +4116,9 @@ function fixOcrLine(text) {
 // OCR 常把题号读错：能换算就换算，否则按上一题顺延。
 function ocrQuestionHeading(text, previous) {
   if (/contin/i.test(text)) return null;
+  // 题号行和旁边的字粘在一起时，“(6 marks)” 还在：比如 “ition ]6(6 marks)”。
+  const broken = /\S{0,6}(?:ion|tion)\s+\S{1,3}\s*(\(\d+\s*marks?\))/i.exec(latexToPlain(text));
+  if (broken && !OCR_QUESTION_LINE.test(text) && previous) return [text, String(Number(previous.question_number) + 1), broken[1]];
   const match = OCR_QUESTION_LINE.exec(text);
   // 题号后面必须像数字，否则 “Question and Answer Book” 也会算成一题。
   if (!match || !/^(?:[\dOoIl|SsGBZz]{1,3}|\(.*)?$/.test(match[1])) return null;
@@ -4072,6 +4142,8 @@ function parseQuestions(rows) {
   // 一个小问写完分值后出现的文字，是后面小问的共同背景，不属于前一问。
   let lead = [];
   let context = '';
+  let shared = null;
+  const sharedNumber = (value) => Number(String(value || '').replace(/[\]|lI]/g, '1').replace(/[^\d]/g, '')) || null;
   const flushLead = () => {
     if (lead.length && part) part.text = [part.text, ...lead].filter(Boolean).join('\n');
     lead = [];
@@ -4098,9 +4170,19 @@ function parseQuestions(rows) {
     let text = row.text.trim().replace(/^\\\(\s*([a-l]|i{1,3}|iv|v)\.\s*\\\)\s*/, '$1. ').replace(/^\\\(\s*([a-l])\s*\\\)\.\s*/, '$1. ');
     // OCR 可能把旁边的残字读到题号前面，比如 “2a Question 6”。
     if (row.ocr) text = fixOcrLine(text.replace(/^\S{1,4}\s+(?=Question\s+\S{1,3}\s*(?:\(|$))/i, ''));
+    // 公式表不是题目。扫描件可能读不到结束标记，公式表的标题要在跳过页眉之前判断。
+    if (/\bformula sheet\b/i.test(latexToPlain(text))) {
+      question = null;
+      part = null;
+      continue;
+    }
     // 页脚的页码可能被转成公式，要按普通文字判断。
     if (!text || /^[_\s.]+$/.test(text) || NOISE_LINE.test(text) || NOISE_LINE.test(latexToPlain(text).trim())) continue;
-    if (END_LINE.test(text)) {
+    // OCR 可能把结束标记中间读坏，比如 “End of N∪|1|p|e-C00|ce Question Book”。
+    if (END_LINE.test(text) || /^End of\b.*\bBook\b|Victorian Curriculum and Assessment\s*Authority\s+\d{4}/i.test(latexToPlain(text))) {
+      // 最后一题到这一行为止，后面的版权行、空白和公式表都不属于它。
+      const lastRegion = question && question.regions[question.regions.length - 1];
+      if (lastRegion && lastRegion.page === row.page) lastRegion.end = row.top;
       question = null;
       part = null;
       continue;
@@ -4119,6 +4201,16 @@ function parseQuestions(rows) {
       continue;
     }
     if (/^instructions\b/i.test(text)) {
+      question = null;
+      part = null;
+      continue;
+    }
+    const sharedLine = SHARED_LINE.exec(latexToPlain(text).trim());
+    if (sharedLine && sharedNumber(sharedLine[1])) {
+      flushLead();
+      const from = sharedNumber(sharedLine[1]);
+      shared = { from, to: sharedNumber(sharedLine[2]) || from + 1, page: row.page, top: row.top, end: null, text: [text], open: true };
+      row.owner = true;
       question = null;
       part = null;
       continue;
@@ -4144,9 +4236,29 @@ function parseQuestions(rows) {
       };
       part = null;
       questions.push(question);
+      // 共用材料放在每道相关题的最前面：第一题直接往上扩，后面的题多一段裁图。
+      const number = Number(heading[1]);
+      if (shared && (number < shared.from || number > shared.to)) shared = null;
+      if (shared) {
+        shared.open = false;
+        question.text = [...shared.text, question.text].filter(Boolean).join('\n');
+        question.plain = shared.plain || '';
+        if (shared.end === null && shared.page === row.page) shared.end = row.top;
+        if (shared.page) {
+          if (number === shared.from && shared.page === row.page) question.regions[0].top = shared.top;
+          else question.regions.unshift({ page: shared.page, top: shared.top, end: shared.end, shared: true });
+        }
+      }
       continue;
     }
-    if (!question) continue;
+    if (!question) {
+      if (shared && shared.open && (!row.page || row.page === shared.page)) {
+        row.owner = true;
+        shared.text.push(text);
+        if (row.plain) shared.plain = `${shared.plain || ''}\n${row.plain}`;
+      }
+      continue;
+    }
     row.owner = question;
     (row.math_problems || []).forEach((problem) => question.math_problems.push(problem));
     if (row.page) {
@@ -4206,6 +4318,10 @@ function parseQuestions(rows) {
       addLine(text);
     }
     if (trailing && part) part.marks = Number(trailing[2] || trailing[3]);
+    if (row.plain) {
+      const target = part || question;
+      target.plain = `${target.plain || ''}\n${row.plain}`;
+    }
   }
   flushLead();
   return questions;
@@ -4219,6 +4335,33 @@ function finishQuestion(q) {
   if (q.options >= 3) q.question_type = 'multiple choice';
   else q.question_type = (q.marks || 0) >= 5 || q.sub_parts.length >= 3 ? 'extended response' : 'short answer';
   return q;
+}
+
+// OCR 可能漏掉 “SECTION B” 这一行。题号从头开始，说明进入了下一个 Section，否则两区的题号会撞车。
+function restartSections(questions) {
+  let shift = 0;
+  questions.forEach((q, index) => {
+    const previous = questions[index - 1];
+    const restarted = previous && Number(q.question_number) === 1 && Number(previous.question_number) >= 5 &&
+      (q.section || '') === (questions[index - 1].originalSection || '');
+    q.originalSection = q.section || '';
+    if (restarted) shift += 1;
+    if (!shift) return;
+    if (shift === 1 && !previous.section) questions.slice(0, index).forEach((item) => { item.section = 'Section A'; });
+    const base = (q.section || 'Section A').slice(-1).charCodeAt(0);
+    q.section = `Section ${String.fromCharCode(base + shift)}`;
+  });
+  questions.forEach((q) => { delete q.originalSection; });
+  return questions;
+}
+
+// OCR 可能漏掉第一个板块标题。General 的板块顺序固定，第一个之前的题只能属于 Data analysis。
+function fillLeadingArea(questions) {
+  const first = questions.find((q) => q.area);
+  if (first && /^Recursion/i.test(first.area)) {
+    questions.slice(0, questions.indexOf(first)).forEach((q) => { q.area = 'Data analysis'; });
+  }
+  return questions;
 }
 
 // 选项全是图的选择题读不到 A–D 文字：同 Section 都是 1 分选择题时按选择题处理。
@@ -4240,19 +4383,23 @@ function inferChoiceQuestions(questions) {
 
 function detectPaper(text, fileName, taxonomy) {
   const head = text.slice(0, 1500);
+  // 扫描件的封面常被 OCR 读坏，这时看全卷每页都有的页眉页脚。
+  const mentions = (name) => (text.match(new RegExp(name.replace(/ /g, '\\s*'), 'gi')) || []).length;
+  const frequent = Object.keys(taxonomy).map((name) => [name, mentions(name)]).sort((a, b) => b[1] - a[1])[0];
   const subject = Object.keys(taxonomy)
     .find((name) => new RegExp(name.replace(/ /g, '\\s*'), 'i').test(head)) ||
+    (frequent && frequent[1] >= 2 ? frequent[0] : null) ||
     (/\bSM\b|specialist/i.test(fileName) ? 'Specialist Mathematics' : null) ||
     (/methods/i.test(fileName) ? 'Mathematical Methods' : null) ||
     (/general/i.test(fileName) ? 'General Mathematics' : null) ||
     (/foundation/i.test(fileName) ? 'Foundation Mathematics' : '未识别');
   const vcaa = /VCE Examination|©\s*VCAA|Victorian Curriculum and Assessment/i.test(text);
-  const exam = /Examination\s+(\d)/i.exec(head);
+  const exam = /Examination\s+(\d)/i.exec(head) || /Examination\s+(\d)/i.exec(text);
   const sac = /\bSAC\b/i.test(head) || /\bSAC\b/i.test(fileName);
   const unit = /Units?\s*(?:1|2|1\s*(?:and|&|\/)\s*2)\b/i.test(head) ? 'Unit 1/2'
     : (vcaa || /Units?\s*(?:3|4|3\s*(?:and|&|\/)\s*4)\b/i.test(head) ? 'Unit 3/4' : 'Unknown');
   const owner = /copyright\s*[@©]?(?:️)?\s*([A-Z][\w&. ]+?)(?:\s+Pty|\s+Ltd|$|\n)/im.exec(text);
-  const year = /\b(20\d{2})\b/.exec(head) || /\b(20\d{2})\b/.exec(fileName);
+  const year = /\b(20\d{2})\b/.exec(head) || /\b(20\d{2})\b/.exec(fileName) || /\b(20\d{2})\s+VCE\b/.exec(text);
   return {
     subject,
     unit,
@@ -4357,10 +4504,17 @@ function regionBounds(questions, pages) {
     q.regions.forEach((region, i) => {
       const page = pages[region.page - 1];
       const nextRegion = q.regions[i + 1];
-      const sameNext = next && next.regions[0].page === region.page ? next.regions[0].top : null;
+      // 下一题借来的共用材料不算下一题的开始。
+      const nextOwn = next && next.regions.find((item) => !item.shared);
+      const sameNext = nextOwn && nextOwn.page === region.page ? nextOwn.top : null;
       region.topRatio = Math.max(0, (region.top - 6) / page.height);
       region.bottomRatio = (!nextRegion && sameNext !== null ? sameNext - 4 : page.height * 0.95) / page.height;
       region.cutBottom = (!nextRegion && sameNext !== null ? sameNext - 2 : page.height) / page.height;
+      if (region.shared || (region.end !== null && region.end !== undefined)) {
+        const end = region.end === null || region.end === undefined ? page.height * 0.95 : region.end - 2;
+        region.bottomRatio = end / page.height;
+        region.cutBottom = end / page.height;
+      }
       // 不属于任何题的行：页眉、页脚、续页提示、Section 标题、说明文字、答题横线。切图时涂掉。
       // 纯数字的行在页边才是页码，页面中间的是图表刻度，不能涂掉。
       const isTick = (row) => /^[\d\s.,]+$/.test(row.text) && row.top > page.height * 0.08 && row.top < page.height * 0.93;
@@ -4712,6 +4866,145 @@ async function attachPdfImages(questions, onProgress) {
   }
 }
 
+// ---------- 判定规则开始（由训练脚本生成）----------
+const TOPIC_RULES = {
+  "Mathematical Methods": {
+    areas: {
+      "": [
+        ["Statistics: sample proportions and confidence intervals", String.raw`sample proportion|confidence interval|hat\{p\}|random sample|sample of \d+`],
+        ["Probability: continuous random variables", String.raw`probability density|density function|continuous random|normal(ly)? (random|distrib)|standard normal|normal random`],
+        ["Probability: discrete random variables", String.raw`probabilit|pr ?\(|binomial|\bbi ?\(|discrete random|\bfair\b|\bdie\b|\bcoin\b|independent events|selected at random|chosen (at )?random|at random`],
+        ["Algebra, number and structure", String.raw`algorithm|pseudocode|newton|for loop`],
+        ["Functions, relations and graphs", String.raw`sketch|sequence of transformations|dilation|translation|asymptote|amplitude|\bperiod\b|best represents the graph`],
+        ["Calculus: differentiation", String.raw`maximis|minimis|minimum possible|largest possible|smooth`],
+        ["Calculus: anti-differentiation and integration", String.raw`∫|integral|anti-?deriv|area (bounded|between|of the|enclosed)|trapezium|average value|has the derivative|[fgh]'\(x\)=.*find [fgh]\(x\)|\)\s?d[xt]\b`],
+        ["Calculus: differentiation", String.raw`derivative|differentiat|\(dy\)/\(dx\)|\(d\)/\(dx\)|dy/dx|[fgh/]\^?['’”]\s*\(|gradient|tangent|stationary|turning point|inflection|maxim|minim|rate of change|differentiable`],
+        ["Functions, relations and graphs", String.raw`the range\b|range of|domain\b|axial intercept|x ?-?intercept|(f|g)∘|∘ ?(f|g)`],
+        ["Algebra, number and structure", String.raw`simultaneous|system of|\bsolve\b|solutions?\b|values? of (k|a|m|n)\b|inverse|log _\d`],
+        ["Functions, relations and graphs", null],
+      ],
+    },
+    leads: [],
+    weak: [],
+  },
+  "Specialist Mathematics": {
+    areas: {
+      "": [
+        ["Logic and proof", String.raw`contrapositive|converse|contradiction|counter-?example|negation|induction|\bprove\b|\bproof\b`],
+        ["Hypothesis testing for a population mean", String.raw`p value|p-value|hypothes|\bnull\b|type i+ error|significance`],
+        ["Confidence intervals for the population mean", String.raw`confidence interval|minimum size of the sample`],
+        ["Distribution of linear combinations of random variables", String.raw`total (amount|mass|time|cost)|linear combination`],
+        ["Distribution of the sample mean", String.raw`sample mean|sampling distribution|overline\{x\}|random samples?\b|mean of (a|the) sample|probability density`],
+        ["Distribution of linear combinations of random variables", String.raw`normally distributed|independent|\bvar\(|variance|sim n ?\(`],
+        ["Differential equations", String.raw`differential equation|direction field|slope field|euler|logistic|\(d[a-z]\)/\(dt\)|h ?[×*] ?f ?\(`],
+        ["Complex numbers", String.raw`complex|argand|\barg\b|\bcis\b|conjugate`],
+        ["Differential calculus and integral calculus", String.raw`poured|inverted|\bcone\b|parametric|slope of the tangent|revolution|revolving|rotated about|arc length|length of the curve`],
+        ["Vector calculus", String.raw`position vector|equation of the path|path of the|\br ?\(t\)|r_[a-z0-9]+ ?\(t\)|acceleration vector|velocity vector|\)i\s*[-+].*\)j`],
+        ["Vector and Cartesian equations", String.raw`\bplanes?\b|cartesian equation|vector equation|skew|parallel lines|two lines|lines? (given|defined)|\bpi _\d|shortest distance`],
+        ["Complex numbers", String.raw`\bre ?\(|\bim ?\(|z∈|(?<![-+\dy] )(?<![-+\dy])z ?=|\|z|imaginary|z_\d|z\^\d|∈ ?c\b`],
+        ["Kinematics: rectilinear motion", String.raw`particle|vertically|drone|\bobject\b|\btrain\b|velocity|acceleration|\bcar\b|(moves?|moving|travels?|travelling|along) (in |along )?a? ?straight|m s\^|projected|dropped|motorcycle`],
+        ["Vectors", String.raw`vector|resolute|dot product|cross product|parallelogram`],
+        ["Differential calculus and integral calculus", String.raw`∫|integral|substitution|by parts|implicit|\(dy\)/\(dx\)|i_n\b|tangent to the curve|the curve|volume`],
+        ["Functions, relations and graphs", null],
+      ],
+    },
+    leads: ["Vector calculus", "Vector and Cartesian equations", "Hypothesis testing for a population mean", "Differential equations", "Complex numbers", "Distribution of the sample mean"],
+    weak: ["Functions, relations and graphs", "Kinematics: rectilinear motion", "Differential calculus and integral calculus", "Vectors"],
+  },
+  "General Mathematics": {
+    areas: {
+      "Data": [
+        ["Investigating and modelling time series data", String.raw`seasonal|deseason|smooth|time series`],
+        ["Investigating association between two variables", String.raw`correlation coefficient|coefficient of determination|pearson|causal|two-way`],
+        ["Investigating and modelling linear associations", String.raw`least squares|residual|linearis|transformation|interpolat|extrapolat|\bslope\b|y-intercept|regression`],
+        ["Investigating association between two variables", String.raw`explanatory|response variable|\bassociation\b|correlation`],
+        ["Investigating data distributions", null],
+      ],
+      "Recu": [
+        ["Annuities and perpetuities", String.raw`annuit|perpetuit`],
+        ["Depreciation of assets", String.raw`depreciat|unit cost|scrap|flat rate`],
+        ["Reducing balance loans", String.raw`\bloan|repay|amortis|borrow`],
+        ["Compound interest investment with periodic and equal additions to the principal", String.raw`extra (one-off )?(payment|amount)|\badds?\b|additional|regular deposit|further deposit|deposits?\b.*(each|every|after)`],
+        ["Compound interest investments and loans", null],
+      ],
+      "Matr": [
+        ["Matrices and their applications", String.raw`permutation|dominance|identity matrix|communicat`],
+        ["Transition matrices", String.raw`transition|leslie|life.cycle|long term|state matrix|steady state|from one \w+ to the next|(this|next) (day|week|month|year|show)|t\^\d|s_0|s_n`],
+        ["Matrices and their applications", null],
+      ],
+      "Netw": [
+        ["Matching problems", String.raw`each allocated|allocation|assign|hungarian|bipartite|\btasks?\b|\bduties\b|project parts?`],
+        ["Scheduling problems and critical path analysis", String.raw`critical path|float|predecessor|earliest|latest start|precedence|activity|activities [a-z]\b|\d+ activities|project`],
+        ["Flow problems", String.raw`maximum flow|minimum cut|capacity|\bcuts?\b|\bsink\b|\bflow\b|one-way`],
+        ["Trees and minimum connector problems", String.raw`spanning tree|connect all|minimum length of cable|minimum cost to link`],
+        ["Exploring and travelling problems", String.raw`euler(ian)? (trail|circuit)|hamiltonian|\btrail\b|\bcircuit\b|exactly once|travel along all`],
+        ["Shortest path problems", String.raw`shortest|minimum distance`],
+        ["Graphs and networks", null],
+      ],
+    },
+    leads: [],
+    weak: [],
+  },
+};
+// ---------- 判定规则结束 ----------
+
+// VCE 数学 Unit 3/4 用有序判定规则：从上往下，第一条命中的就是结果，最后一条是默认。
+const compiledRules = new Map();
+
+function ruleTopic(subject, area, text) {
+  const set = TOPIC_RULES[subject].areas;
+  const rows = set[area] || set[''];
+  for (const [topic, pattern] of rows) {
+    if (pattern === null) return topic;
+    if (!compiledRules.has(pattern)) compiledRules.set(pattern, new RegExp(pattern));
+    if (compiledRules.get(pattern).test(text)) return topic;
+  }
+  return null;
+}
+
+// 去掉选择题选项再判断，选项里的词会误导。必须和训练脚本的 tidy() 一致。
+function ruleText(text) {
+  return `\n${text.toLowerCase()}`.replace(/\n\s*a\s*[.,]\s[\s\S]*$/, '').replace(/\s+/g, ' ').trim();
+}
+
+// 扫描件同时看还原后的文字和 OCR 原文。
+function ruleTexts(item) {
+  return `${ruleText(latexToPlain(item.text || ''))} ${ruleText(item.plain || '')}`.trim();
+}
+
+function classifyByRules(q, paper, taxonomy) {
+  const rules = TOPIC_RULES[paper.subject];
+  if (!rules || paper.unit !== 'Unit 3/4') return null;
+  const area = (q.area || (paper.subject === 'General Mathematics' ? 'Data' : '')).slice(0, 4);
+  const allowed = new Set(candidateTopics(taxonomy, paper, null));
+  const area4 = area && rules.areas[area[0].toUpperCase() + area.slice(1, 4).toLowerCase()] ? area[0].toUpperCase() + area.slice(1, 4).toLowerCase() : '';
+  const parts = q.sub_parts.filter((p) => (p.marks || 0) > 0);
+  if (!parts.length) {
+    const topic = ruleTopic(paper.subject, area4, [q, ...q.sub_parts].map(ruleTexts).join(' '));
+    return allowed.has(topic) ? { topic, topic_fit: 'clear', alternative_topics: [], reason: '按判定规则。' } : null;
+  }
+  const rows = rules.areas[area4] || rules.areas[''];
+  const fallback = rows[rows.length - 1][0];
+  const lead = ruleTopic(paper.subject, area4, ruleTexts(q));
+  const votes = new Map();
+  parts.forEach((part) => {
+    let topic = ruleTopic(paper.subject, area4, `${ruleTexts(part)} ${ruleText(latexToPlain(part.context || ''))}`);
+    if (topic === fallback || (rules.leads.includes(lead) && rules.weak.includes(topic))) topic = lead;
+    part.topic = topic;
+    votes.set(topic, (votes.get(topic) || 0) + part.marks);
+  });
+  const total = [...votes.values()].reduce((sum, value) => sum + value, 0);
+  const ranked = [...votes.entries()].sort((a, b) => b[1] - a[1]);
+  if (!ranked.every(([topic]) => allowed.has(topic))) return null;
+  const others = ranked.slice(1).filter(([, marks]) => marks >= total / 3).slice(0, 2).map(([topic]) => topic);
+  return {
+    topic: ranked[0][0],
+    topic_fit: others.length ? 'split' : 'clear',
+    alternative_topics: others,
+    reason: `按小问分值投票：${ranked.map(([topic, marks]) => `${topic} ${marks} 分`).join('、')}。`,
+  };
+}
+
 /* ---------- 非 AI 模式：关键词分类 ---------- */
 // 关键词来自 VCAA Study Design 和常见题面用语。多词短语比单词更可靠，权重更高。
 const TOPIC_KEYWORDS = {
@@ -4858,6 +5151,8 @@ const STATISTICS_TOPIC = /sample mean|confidence interval|hypothesis|linear comb
 
 // 大题各小问考的内容不同：先逐个小问判断，再按分值投票。
 function classifyByKeywords(q, paper, taxonomy) {
+  const ruled = classifyByRules(q, paper, taxonomy);
+  if (ruled) return ruled;
   const candidates = candidateTopics(taxonomy, paper, q.area);
   const stem = latexToPlain(q.text).toLowerCase();
   const whole = `${stem}\n${q.sub_parts.map((p) => latexToPlain(p.text)).join('\n')}`.toLowerCase();
@@ -4925,7 +5220,7 @@ async function parseByRules(taxonomy) {
   }
 
   const paper = detectPaper(paperText, (state.sourceFile || state.sourceFiles[0]).name, taxonomy);
-  const questions = inferChoiceQuestions(parseQuestions(rows).map(finishQuestion));
+  const questions = fillLeadingArea(restartSections(inferChoiceQuestions(parseQuestions(rows).map(finishQuestion))));
   if (!questions.length) {
     throw new UserError('没有识别出题目', '没有找到 “Question 1” 这样的题号。这种格式暂时不支持，可以改用 AI 服务。');
   }
@@ -4955,6 +5250,7 @@ async function runRules(taxonomy, started) {
     state.questions.forEach((q, index) => {
       q.figures = questions[index].figures;
       q.snapshot = questions[index].snapshot;
+      q.area = questions[index].area;
     });
   }
   renderUsage({ promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 }, performance.now() - started);
@@ -5557,6 +5853,109 @@ function renderStats() {
   const figures = allFigures();
   $('sFig').textContent = `${figures.filter(({ figure }) => figure.image).length} / ${figures.length}`;
   updateRelocateButton();
+  queueBankSave();
+}
+
+/* ---------- 题库：存在浏览器 IndexedDB，换设备不会同步 ---------- */
+let bankTimer = null;
+
+function openBank() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('vceQuestionBank', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('questions', { keyPath: 'source_id' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function bankRequest(mode, action) {
+  const db = await openBank();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('questions', mode);
+    const result = action(transaction.objectStore('questions'));
+    transaction.oncomplete = () => { db.close(); resolve(result.result); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+  });
+}
+
+const bankRows = () => bankRequest('readonly', (store) => store.getAll());
+
+// 同一题重新分析或修改后覆盖旧记录，题目 ID 由来源信息决定。
+function queueBankSave() {
+  clearTimeout(bankTimer);
+  if (!state.questions.length) return;
+  bankTimer = setTimeout(async () => {
+    try {
+      const { subject, unit } = state.paper;
+      const rows = exportRows(true).map((row) => ({ ...row, subject, unit, saved_at: new Date().toISOString() }));
+      await bankRequest('readwrite', (store) => {
+        let last;
+        rows.forEach((row) => { last = store.put(row); });
+        return last;
+      });
+      await renderBank();
+    } catch (e) {
+      console.warn('题库保存失败', e);
+    }
+  }, 600);
+}
+
+function bankSummary(rows) {
+  const subjects = new Map();
+  rows.forEach((row) => {
+    const subject = row.subject || '未知科目';
+    if (!subjects.has(subject)) subjects.set(subject, { marks: 0, count: 0, topics: new Map() });
+    const group = subjects.get(subject);
+    const topic = group.topics.get(row.topic) || { count: 0, marks: 0, papers: new Set() };
+    topic.count += 1;
+    topic.marks += row.marks || 0;
+    topic.papers.add(row.source.file_sha256 || row.source.paper_title);
+    group.topics.set(row.topic, topic);
+    group.count += 1;
+    group.marks += row.marks || 0;
+  });
+  return subjects;
+}
+
+async function renderBank() {
+  const rows = await bankRows();
+  $('bank').hidden = !rows.length;
+  const papers = new Set(rows.map((row) => row.source.file_sha256 || row.source.paper_title));
+  $('bankTitle').textContent = `题库：${papers.size} 份试卷，${rows.length} 道题`;
+  const body = $('bankBody');
+  body.textContent = '';
+  [...bankSummary(rows)].sort((a, b) => b[1].count - a[1].count).forEach(([subject, group]) => {
+    const table = el('table', 'bank-table');
+    const header = el('tr');
+    [[subject, ''], ['题数', 'num'], ['分值', 'num'], ['分值占比', 'num'], ['出现试卷', 'num']].forEach(([label, name]) => header.append(el('th', name, label)));
+    table.append(header);
+    [...group.topics].sort((a, b) => b[1].marks - a[1].marks).forEach(([topic, data]) => {
+      const row = el('tr');
+      row.append(
+        el('td', '', topic), el('td', 'num', String(data.count)), el('td', 'num', String(data.marks)),
+        el('td', 'num', `${group.marks ? Math.round(data.marks / group.marks * 100) : 0}%`), el('td', 'num', String(data.papers.size)),
+      );
+      table.append(row);
+    });
+    body.append(table);
+  });
+}
+
+async function exportBankJson() {
+  download('vce-question-bank.json', JSON.stringify(await bankRows(), null, 2), 'application/json');
+}
+
+async function exportBankCsv() {
+  const header = ['source_id', 'source', 'subject', 'unit', 'year', 'section', 'question_number', 'marks', 'topic', 'alternative_topics', 'question_type', 'difficulty', 'confirmed', 'text'];
+  const rows = (await bankRows()).map((q) => [q.source_id, q.source.label, q.subject, q.unit, q.source.year, q.section, q.question_number, q.marks,
+    q.topic, q.alternative_topics.join('; '), q.question_type, q.difficulty, q.confirmed, q.text]);
+  download('vce-question-bank.csv', '\ufeff' + [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+async function clearBank() {
+  if (!window.confirm('清空后题库里的题目和截图都会删除，不能恢复。确定清空吗？')) return;
+  await bankRequest('readwrite', (store) => store.clear());
+  await renderBank();
 }
 
 function updateRelocateButton() {
@@ -5691,14 +6090,13 @@ function renderCard(q) {
   if (!currentProvider().rules) head.append(el('span', 'tag conf', `分类置信度 ${q.confidence.toFixed(2)}`));
   const sourceLine = el('div', 'source-line');
   card.append(head, sourceLine);
-  // 有切题截图时，题目以原卷截图为准；提取的文字折叠起来，继续用于分类、搜索和导出。
-  const textHost = q.snapshot ? el('details', 'extracted') : card;
+  // 有切题截图时页面只显示原卷截图。提取的文字留在后台，用于分类、题库和导出。
+  const textHost = q.snapshot ? el('div') : card;
   if (q.snapshot) {
     const image = el('img', 'qshot');
     image.src = q.snapshot;
     image.alt = `第 ${q.question_number} 题原卷截图`;
-    textHost.append(el('summary', '', '查看提取的文字（用于分类和搜索）'));
-    card.append(image, textHost);
+    card.append(image);
   }
   textHost.append(el('div', 'qtext', q.text));
 
@@ -5717,7 +6115,7 @@ function renderCard(q) {
   }
 
   const figureHost = el('div', 'figs');
-  textHost.append(figureHost); // 配图已经在截图里，单独的图放进折叠区，需要时再看。
+  textHost.append(figureHost); // 配图已经在截图里，这里的数据只进导出。
 
   const update = (field) => (value) => {
     q[field] = value;
@@ -6173,6 +6571,7 @@ function exportRows(embed = true) {
     },
     question_number: q.question_number,
     section: q.section,
+    area: q.area || null,
     text: q.text,
     sub_parts: q.sub_parts,
     figures: exportFigures(q, embed),
@@ -6330,6 +6729,10 @@ function init() {
   $('priceIn').addEventListener('input', renderCost);
   $('priceOut').addEventListener('input', renderCost);
   $('exportJson').addEventListener('click', exportJson);
+  $('bankJson').addEventListener('click', exportBankJson);
+  $('bankCsv').addEventListener('click', exportBankCsv);
+  $('bankClear').addEventListener('click', clearBank);
+  renderBank().catch((e) => console.warn('题库读取失败', e));
   $('exportCsv').addEventListener('click', exportCsv);
   $('onlyReview').addEventListener('change', (e) => $('cards').classList.toggle('review-only', e.target.checked));
   $('exportZip').addEventListener('click', exportZip);

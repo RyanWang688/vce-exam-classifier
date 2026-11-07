@@ -1,0 +1,12 @@
+"""Blind labels: written from the question text before seeing any prediction for these papers."""
+L = {}
+L["2025NMM1"] = "1=D 2=D,A 3=F,A 4=P,S 5=I,A 6=P 7=A,F 8=I,D"
+L["2025NMM2"] = ("A1=A A2=I,D A3=I A4=I,F A5=C A6=P A7=F,D A8=I A9=F,D A10=D A11=F,A A12=P A13=A,F A14=F,A A15=D A16=C A17=P A18=A A19=P A20=A "
+                 "B1=D,F,A B2=F,I,D,A B3=F,I,D B4=C,P,S B5=D,F,I")
+L["2025NSM1"] = "1=VC,VE 2=CI,SM 3=L 4=Z 5=DE 6=VE 7=K 8=C 9=C"
+L["2025NSM2"] = ("A1=L A2=F A3=F A4=Z A5=Z A6=DE A7=C A8=C A9=C A10=C A11=K A12=K A13=V A14=V A15=VC A16=V A17=V A18=V,VE A19=LC A20=LC,SM "
+                 "B1=F B2=Z B3=C,DE B4=VC,K B5=VE,V B6=HT,CI,LC,SM")
+L["2025NGM1"] = ("1=DD 2=DD 3=DD 4=DD 5=DD 6=DD 7=LR 8=LR 9=AS,LR 10=LR 11=DD 12=LR 13=TS 14=TS 15=TS 16=TS "
+                 "17=CI,DP 18=AN 19=RB 20=DP 21=CI 22=RB 23=CI,RB 24=RB 25=MA 26=MA 27=TM 28=MA 29=MA 30=MA 31=TM 32=TM "
+                 "33=MT 34=GN 35=GN 36=TR 37=GN 38=SP,ET 39=FL 40=CP")
+L["2025NGM2"] = "1=DD 2=DD 3=AS,DD 4=LR,AS 5=TS 6=DP 7=AN 8=RB 9=CI,AD 10=MA 11=MA 12=MA 13=TM 14=ET,GN 15=FL 16=CP"
