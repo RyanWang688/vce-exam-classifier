@@ -45,6 +45,25 @@
   check('难度换算', difficultyFromFacility(0.7) === 'easy' && difficultyFromFacility(0.5) === 'medium' && difficultyFromFacility(0.3) === 'hard');
   check('NHT 卷不用考试报告', reportDifficulty({ subject: 'Mathematical Methods', paper_type: 'VCAA Exam 2 (NHT)', sitting: 'NHT', year: 2024 }, []) === null);
 
+  // AI 补题的安排和本地检查（不调用 AI）。
+  const options = { ...base, minutes: 60, topics: ['T1'], types: ['multiple choice', 'extended response'] };
+  const requests = gapRequests(options, [], rows);
+  const planned = requests.reduce((sum, request) => sum + questionMinutes(request), 0);
+  check('补题凑够时长且不超时', planned <= 60 && planned >= 60 - MINUTES_PER_MARK * 2);
+  check('补题只出所选知识点和题型', requests.every((request) => request.topic === 'T1' && options.types.includes(request.question_type)));
+  const request = { subject: 'Mathematical Methods', topic: 'T1', question_type: 'extended response', marks: 4 };
+  const good = { stem: 'Let \\(f(x)=x^2\\).', options: [], gen_parts: [{ label: 'a', text: 'Find \\(f\'(1)\\).', marks: 2 }, { label: 'b', text: 'Find \\(f\'(2)\\).', marks: 2 }], answers: [], solution: 'x' };
+  check('分值合计正确时通过', localChecks(good, request, []).fatal.length === 0);
+  const wrongMarks = { ...good, gen_parts: [{ label: 'a', text: 'Find it.', marks: 3 }] };
+  check('分值合计不对时拒绝', localChecks(wrongMarks, request, []).fatal.length > 0);
+  const copyText = 'Consider the function f defined for all real numbers x by the rule given below and find the derivative at the point';
+  const copied = { ...good, stem: copyText };
+  check('照抄范例时拒绝', localChecks(copied, request, [{ text: copyText }]).fatal.length > 0);
+  const choice = { stem: 'Q', options: ['1', '2', '3', '4'], gen_parts: [], answers: [{ label: 'MC', value: 'E' }], solution: '' };
+  check('选择题答案不在选项里时拒绝', localChecks(choice, { ...request, question_type: 'multiple choice', marks: 1 }, []).fatal.length > 0);
+  check('答案写法不同也算相同', sameAnswer('\\left( 2 \\right)', '(2)'));
+  check('不同的答案不算相同', !sameAnswer('2', '3'));
+
   window.paperCheckReport = failures;
   console.log(failures.length ? `组卷检查失败：${failures.join('；')}` : '组卷检查全部通过');
 })();

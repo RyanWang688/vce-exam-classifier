@@ -194,6 +194,13 @@
   .paper-summary { font-weight: 600; margin: 0 0 10px; }
   .paper-item .row { margin-top: 8px; }
   #printSheet { display: none; }
+  .spec-text { min-height: 320px; font-family: inherit; }
+  .gen-body { margin-top: 8px; }
+  .gen-options { padding-left: 22px; list-style: upper-alpha; }
+  .gen-answer { margin-top: 8px; }
+  .gen-answer .qtext { margin-top: 4px; }
+  .review { margin-top: 10px; display: grid; gap: 6px; }
+  .tag.warn { background: var(--warn-soft); color: var(--warn-ink, inherit); }
   @media print {
     body > *:not(#printSheet) { display: none !important; }
     #printSheet { display: block; color: #000; }
@@ -202,6 +209,7 @@
     .print-q { break-inside: avoid; margin-bottom: 18px; }
     .print-label { font-weight: 700; margin-bottom: 4px; }
     .print-q img { width: 100%; }
+    .print-answers { break-before: page; }
   }
   .bank-table th { white-space: nowrap; }
   .bank summary { font-weight: 600; cursor: pointer; }
@@ -304,6 +312,35 @@
     <div class="tabs" role="tablist">
       <button id="tabAnalysis" class="tab active" type="button" role="tab">分析试卷</button>
       <button id="tabPaper" class="tab" type="button" role="tab">组卷</button>
+      <button id="tabSpec" class="tab" type="button" role="tab">出题要求</button>
+    </div>
+
+    <div id="specView" hidden>
+      <div class="panel paper-form">
+        <p class="hint" id="specKey"></p>
+        <p id="specVersion"></p>
+        <label class="field"><span>出题规范（AI 每次出题都会带上，可直接修改）</span>
+          <textarea id="specText" class="spec-text" spellcheck="false"></textarea>
+        </label>
+        <div class="row">
+          <input id="specNote" type="text" placeholder="这一版改了什么（可选）">
+          <button id="specSave" class="primary" type="button">保存为新版本</button>
+          <button id="specReset" type="button">填入默认规范</button>
+        </div>
+        <div id="specHistoryRow" class="row" hidden>
+          <select id="specHistory" aria-label="历史版本"></select>
+          <button id="specRestore" type="button">载入这一版</button>
+        </div>
+        <hr>
+        <label class="field"><span>一次性写下你的出题要求，AI 会把它整理进规范（不用每次再说）</span>
+          <textarea id="specRequest" rows="5" placeholder="例如：选择题的干扰项都要来自学生常见错误；概率题一律写明分布参数；大题最后一问要有一定难度……"></textarea>
+        </label>
+        <div class="row"><button id="specMerge" type="button">让 AI 整理进规范</button></div>
+        <hr>
+        <p class="hint" id="specStats"></p>
+        <div class="row"><button id="specFromFeedback" type="button" disabled>根据审核意见提出修改（至少 5 条）</button></div>
+        <div id="specMessage" class="alert" hidden></div>
+      </div>
     </div>
 
     <div id="paperView" hidden>
@@ -341,20 +378,25 @@
           </fieldset>
           <fieldset class="field"><legend>出题方式</legend>
             <label class="check"><input type="radio" name="pMode" value="bank" checked> 只从题库选（不用 AI）</label>
-            <label class="check muted"><input type="radio" name="pMode" value="fill" disabled> 题库优先，不够由 AI 补（下一阶段）</label>
-            <label class="check muted"><input type="radio" name="pMode" value="new" disabled> 全部由 AI 仿照题库新出（下一阶段）</label>
+            <label class="check"><input type="radio" name="pMode" value="fill"> 题库优先，不够由 AI 补</label>
+            <label class="check"><input type="radio" name="pMode" value="new"> 全部由 AI 仿照题库新出</label>
+            <span class="hint" id="pModeHint"></span>
           </fieldset>
         </div>
         <div class="row">
           <button id="pBuild" class="primary" type="button">生成试卷</button>
           <button id="pAgain" type="button">换一批</button>
+          <button id="pStop" type="button" hidden>停止 AI 出题</button>
         </div>
+        <p id="paperProgress" class="hint" hidden></p>
       </div>
       <div id="paperWarn" class="alert warn" hidden></div>
       <p id="paperSummary" class="paper-summary"></p>
+      <p id="paperCost" class="hint"></p>
       <div id="paperTools" class="row" hidden style="margin-bottom:10px">
         <button id="pPrint" type="button">打印 / 存为 PDF</button>
         <button id="pExport" type="button">导出题目清单 CSV</button>
+        <label class="check"><input id="pAnswers" type="checkbox" checked> 打印时附答案页</label>
         <span class="hint">裁图里仍是原卷题号，打印时以左上角的新题号为准。</span>
       </div>
       <div id="paperList" class="cards"></div>
@@ -5165,7 +5207,7 @@ function assemblePaper(rows, options, random) {
   const ratioTotal = options.ratio.easy + options.ratio.medium + options.ratio.hard;
   const difficultyOf = (row) => row.difficulty || (options.includeUnlabelled ? 'medium' : '');
   const pool = rows.filter((row) => row.subject === options.subject && options.topics.includes(row.topic) &&
-    options.types.includes(row.question_type) && row.snapshot && row.marks > 0 &&
+    options.types.includes(row.question_type) && usableInPaper(row) && row.marks > 0 &&
     difficultyOf(row) && (ratioTotal === 0 || options.ratio[difficultyOf(row)] > 0));
   const limit = options.minutes * PAPER_OVERRUN;
   const topicMinutes = new Map();
@@ -5255,11 +5297,18 @@ function renderPaperTopics() {
   $('pLabelled').textContent = `这个科目题库里 ${rows.length} 题，已标难度 ${labelled} 题。`;
 }
 
+// 真题要有裁图；AI 题要老师通过后才能被抽到。
+const usableInPaper = (row) => (row.generated ? row.status === 'approved' : Boolean(row.snapshot));
+
 function buildPaper(newSeed) {
   if (newSeed) paperState.seed = Math.floor(Math.random() * 1e9);
   const options = paperOptions();
   if (!(options.minutes >= 5)) {
     showAlert($('paperWarn'), '时长不对', '请填写 5 分钟以上的时长。');
+    return;
+  }
+  if (document.querySelector('input[name="pMode"]:checked').value !== 'bank') {
+    generateForPaper();
     return;
   }
   const result = assemblePaper(paperState.rows, options, seededRandom(paperState.seed));
@@ -5295,6 +5344,18 @@ function renderPaperView() {
     const tools = el('div', 'row');
     tools.append(level, swap, remove);
     const note = row.difficulty_source === 'vcaa-report' ? ` · 难度来自考试报告（得分率 ${Math.round(row.facility * 100)}%）` : '';
+    if (row.generated) {
+      head.append(el('span', `tag ${row.check_ok ? '' : 'warn'}`, row.check_ok ? 'AI 出题 · 已核对' : 'AI 出题 · 需复核'));
+      if (row.status !== 'approved') head.append(el('span', 'tag', GEN_STATUS[row.status]));
+      item.append(head, el('div', 'source-line', `${row.source.label} · 目标难度 ${DIFFICULTY_LABELS[row.difficulty] || ''} · 规范第 ${row.spec_version} 版`),
+        el('div', 'hint', checkSummary(row)), generatedBody(row, false), tools, reviewControls(row, async () => {
+          paperState.rows = await bankRows();
+          renderPaperView();
+        }));
+      host.append(item);
+      renderMath(item);
+      return;
+    }
     const image = el('img', 'qshot');
     image.src = row.snapshot;
     image.alt = `第 ${index + 1} 题`;
@@ -5302,13 +5363,15 @@ function renderPaperView() {
     host.append(item);
   });
   $('paperTools').hidden = !picked.length;
+  const spent = paperState.spent;
+  $('paperCost').textContent = spent ? `本次 AI 用了 ${formatInt(spent.totalTokenCount)} Token${aiCost() !== null ? `，本页累计约 $${aiCost().toFixed(3)}` : ''}。` : '';
 }
 
 // 换一题：同知识点、同难度、同题型、时长接近，题库里没有就放宽到同知识点。
 function swapPaperQuestion(index) {
   const current = paperState.picked[index];
   const { options } = paperState;
-  const free = paperState.rows.filter((row) => row.subject === options.subject && row.snapshot && row.marks > 0 &&
+  const free = paperState.rows.filter((row) => row.subject === options.subject && usableInPaper(row) && row.marks > 0 &&
     !paperState.picked.includes(row) && options.types.includes(row.question_type));
   const close = (row) => Math.abs(questionMinutes(row) - questionMinutes(current));
   const ranked = [
@@ -5343,11 +5406,31 @@ function printPaper() {
   picked.forEach((row, index) => {
     const block = el('div', 'print-q');
     block.append(el('div', 'print-label', `第 ${index + 1} 题（${row.marks} 分）`));
-    const image = el('img');
-    image.src = row.snapshot;
-    block.append(image);
+    if (row.generated) {
+      block.append(generatedBody(row, true));
+    } else {
+      const image = el('img');
+      image.src = row.snapshot;
+      block.append(image);
+    }
     sheet.append(block);
   });
+  if ($('pAnswers').checked) {
+    const key = el('div', 'print-answers');
+    key.append(el('h2', '', '答案'));
+    picked.forEach((row, index) => {
+      const line = el('div', 'print-q');
+      line.append(el('div', 'print-label', `第 ${index + 1} 题`));
+      if (row.generated) {
+        line.append(el('div', 'qtext', row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${a.value}`).join('；')), el('div', 'qtext', row.solution), el('div', 'qtext', `评分：${row.marking}`));
+      } else {
+        line.append(el('div', '', `原卷题目，答案见 VCAA 评分报告：${row.source.label}`));
+      }
+      key.append(line);
+    });
+    sheet.append(key);
+  }
+  renderMath(sheet);
   window.print();
 }
 
@@ -5361,9 +5444,659 @@ function exportPaperList() {
 function showView(name) {
   $('analysisView').hidden = name !== 'analysis';
   $('paperView').hidden = name !== 'paper';
+  $('specView').hidden = name !== 'spec';
   $('tabAnalysis').classList.toggle('active', name === 'analysis');
   $('tabPaper').classList.toggle('active', name === 'paper');
+  $('tabSpec').classList.toggle('active', name === 'spec');
   if (name === 'paper') openPaperView().catch((e) => showAlert($('paperWarn'), '题库读取失败', String(e)));
+  if (name === 'spec') openSpecView().catch((e) => showAlert($('specMessage'), '读取失败', String(e)));
+}
+
+/* ---------- AI 出题（第二阶段） ---------- */
+// AI 只在后台干活：出题要求设一次就保存，之后每次出题自动带上。老师只点选项，不用和 AI 对话。
+const DEFAULT_SPEC = `## 通用
+- 按 VCE Units 3 & 4 Study Design 出题，不出超纲内容。
+- 用 VCAA 试卷的英文用语和符号，例如 Pr(X = x)、E(X)、"correct to two decimal places"、"Give your answer in the form ..."。
+- 题目只靠文字就能作答，不要依赖看不到的图。需要图时，用文字给出函数和坐标范围。
+- 不照抄范例：换情境、换数字，考同样的能力。
+- 公式用 LaTeX，行内用 \\( \\)，单独一行用 \\[ \\]。
+
+## 选择题
+- 选项个数和题库里同科目的范例一致，只有一个正确答案。
+- 干扰项来自常见错误（符号错、漏条件、算错一步），不能一眼排除。
+- 每题 1 分。
+
+## 简答题和大题
+- 每个小问写明分值，分值之和等于总分。
+- 有计算的小问要说明精度或答案形式。
+- 大题的小问由浅入深，后一问可以用前一问的结果。
+
+## 答案
+- 给出最终答案、完整解答，以及每一分对应哪一步的评分要点。`;
+
+const AI_DB_VERSION = 2;
+const GEN_REASONS = ['答案错', '太简单', '太难', '超纲', '用语不像 VCAA', '和原题太像', '缺条件或有歧义', '其他'];
+const aiState = { running: false, abort: null, usage: { promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 } };
+
+function aiKey() {
+  return storageGet(STORE.key) || '';
+}
+
+function aiModel() {
+  return storageGet(STORE.model) || DEFAULT_MODEL;
+}
+
+async function aiCall(parts, schema) {
+  const key = aiKey();
+  if (!key) throw new UserError('还没有 Gemini Key', '在左侧“AI 服务”选 Google Gemini，填好 Key 后再出题。Key 只存在这台电脑上。');
+  const data = await postGemini({ apiKey: key, model: aiModel(), parts, schema, signal: aiState.abort ? aiState.abort.signal : undefined });
+  const { parsed, usage } = readJson(data);
+  aiState.usage = mergeUsage(aiState.usage, usage);
+  return parsed;
+}
+
+function aiCost() {
+  const price = PRICES[aiModel()];
+  if (!price) return null;
+  const u = aiState.usage;
+  return ((u.promptTokenCount || 0) * price[0] + ((u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0)) * price[1]) / 1e6;
+}
+
+/* 出题规范：带版本，存在题库数据库里 */
+async function specList() {
+  return (await bankRequest('readonly', (store) => store.getAll(), 'specs')).sort((a, b) => b.version - a.version);
+}
+
+async function currentSpec() {
+  const list = await specList();
+  return list[0] || { version: 0, text: DEFAULT_SPEC, created: null };
+}
+
+async function saveSpec(text, note) {
+  const list = await specList();
+  const version = (list[0] ? list[0].version : 0) + 1;
+  await bankRequest('readwrite', (store) => store.put({ version, text, note, created: new Date().toISOString() }), 'specs');
+  return version;
+}
+
+const SPEC_SCHEMA = {
+  type: 'OBJECT',
+  required: ['sections', 'summary'],
+  properties: {
+    sections: { type: 'ARRAY', items: { type: 'OBJECT', required: ['title', 'rules'], properties: { title: { type: 'STRING' }, rules: { type: 'ARRAY', items: { type: 'STRING' } } } } },
+    summary: { type: 'STRING' },
+  },
+};
+
+const specFromSections = (sections) => sections.map((s) => `## ${s.title}\n${s.rules.map((r) => `- ${r}`).join('\n')}`).join('\n\n');
+
+// 老师的说明只读这一次：AI 把它并进现有规范，老师确认后才保存。
+async function mergeRequirements(current, request) {
+  const prompt = `You maintain the question-writing specification for a VCE mathematics question bank.
+Merge the teacher's new requirements into the current specification. Keep every existing rule that does not conflict.
+When a new requirement conflicts with an old rule, the new requirement wins. Remove duplicates. Keep rules short and checkable.
+Write the rules in the same language as the current specification (Chinese), but keep VCAA English terms and notation as they are.
+Group rules into sections: 通用, 选择题, 简答题和大题, 答案, and one section per subject only if needed.
+"summary" lists, in Chinese, what changed.
+
+Current specification:
+${current}
+
+Teacher's new requirements:
+${request}`;
+  const parsed = await aiCall([{ text: prompt }], SPEC_SCHEMA);
+  return { text: specFromSections(parsed.sections), summary: parsed.summary };
+}
+
+async function feedbackRows() {
+  return bankRequest('readonly', (store) => store.getAll(), 'feedback');
+}
+
+// 审核时退回的原因和老师的意见，汇总成规范修改建议，老师确认后才保存。
+async function suggestFromFeedback(current) {
+  const rows = (await feedbackRows()).filter((row) => !row.used);
+  const lines = rows.map((row) => `- [${row.decision}] ${row.subject} / ${row.topic} / ${row.question_type}: ${row.reasons.join(', ')}${row.note ? ` — ${row.note}` : ''}`).join('\n');
+  const prompt = `You maintain the question-writing specification for a VCE mathematics question bank.
+Teachers reviewed AI-written questions. Turn the recurring problems below into specific new or changed rules.
+Only add a rule when at least two reviews point to the same problem, or one review states it explicitly in the note.
+Keep all other existing rules. Write in Chinese, keep VCAA English terms. "summary" lists, in Chinese, what changed and which reviews led to it.
+
+Current specification:
+${current}
+
+Reviews:
+${lines}`;
+  const parsed = await aiCall([{ text: prompt }], SPEC_SCHEMA);
+  return { text: specFromSections(parsed.sections), summary: parsed.summary, ids: rows.map((row) => row.id) };
+}
+
+/* 出题 */
+const QUESTION_SCHEMA = {
+  type: 'OBJECT',
+  required: ['stem', 'options', 'parts', 'answers', 'solution', 'marking', 'skill', 'difficulty'],
+  properties: {
+    stem: { type: 'STRING' },
+    options: { type: 'ARRAY', items: { type: 'STRING' } },
+    parts: { type: 'ARRAY', items: { type: 'OBJECT', required: ['label', 'text', 'marks'], properties: { label: { type: 'STRING' }, text: { type: 'STRING' }, marks: { type: 'INTEGER' } } } },
+    answers: { type: 'ARRAY', items: { type: 'OBJECT', required: ['label', 'value'], properties: { label: { type: 'STRING' }, value: { type: 'STRING' } } } },
+    solution: { type: 'STRING' },
+    marking: { type: 'STRING' },
+    skill: { type: 'STRING' },
+    difficulty: { type: 'STRING', enum: ['easy', 'medium', 'hard'] },
+  },
+};
+
+const ANSWER_SCHEMA = {
+  type: 'OBJECT',
+  required: ['answers'],
+  properties: { answers: { type: 'ARRAY', items: { type: 'OBJECT', required: ['label', 'value'], properties: { label: { type: 'STRING' }, value: { type: 'STRING' } } } } },
+};
+
+const COMPARE_SCHEMA = {
+  type: 'OBJECT',
+  required: ['results'],
+  properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', required: ['label', 'same'], properties: { label: { type: 'STRING' }, same: { type: 'BOOLEAN' }, note: { type: 'STRING' } } } } },
+};
+
+const DIFFICULTY_MEANING = {
+  easy: 'easy: about 65% or more of VCE students would get full marks',
+  medium: 'medium: about 45%–65% of VCE students would get full marks',
+  hard: 'hard: fewer than 45% of VCE students would get full marks',
+};
+const TYPE_NAMES = { 'multiple choice': 'multiple-choice question (1 mark)', 'short answer': 'short-answer question', 'extended response': 'extended-response question with parts' };
+
+function exampleParts(examples) {
+  const parts = [];
+  examples.forEach((row, index) => {
+    parts.push({ text: `Example ${index + 1}: ${row.source.label}. Topic: ${row.topic}. Type: ${row.question_type}. Marks: ${row.marks}. Difficulty: ${row.difficulty || 'not labelled'}.` });
+    if (row.snapshot) parts.push({ inlineData: { mimeType: 'image/jpeg', data: row.snapshot.split(',')[1] } });
+    else parts.push({ text: generatedText(row) });
+  });
+  return parts;
+}
+
+function generationPrompt(spec, request) {
+  const choice = request.question_type === 'multiple choice';
+  return `You write new questions for VCE ${request.subject} Units 3 & 4 practice papers.
+Follow this specification exactly:
+${spec}
+
+Write ONE ${TYPE_NAMES[request.question_type]} worth ${request.marks} mark(s).
+Topic (VCAA Study Design): ${request.topic}.
+Target difficulty: ${DIFFICULTY_MEANING[request.difficulty] || 'medium'}.
+${request.template ? 'Example 1 is the question to imitate: test the same skill at the same level, with a new context and new numbers. Do not reuse its wording.' : 'Use the examples only to match VCAA style. Do not reuse their wording or numbers.'}
+
+Output rules:
+- "stem": the question text. ${choice ? 'Do not put the options in the stem.' : 'For questions with parts, the stem is the shared lead-in.'}
+- "options": ${choice ? 'the options in order, without the letters.' : 'an empty array.'}
+- "parts": ${choice ? 'an empty array.' : `the parts in order with labels a, b, c (or a.i) and marks that add up to ${request.marks}. Use one part labelled "a" if there is only one.`}
+- "answers": the final answer for ${choice ? 'label "MC", value = the correct letter' : 'each part label'}.
+- "solution": a complete worked solution. "marking": which step earns each mark.
+- "skill": one sentence on what the question tests. "difficulty": your own estimate.
+- LaTeX inside \\( \\) or \\[ \\]. Plain text otherwise.`;
+}
+
+function generatedText(row) {
+  const lines = [row.stem || ''];
+  (row.options || []).forEach((option, index) => lines.push(`${String.fromCharCode(65 + index)}. ${option}`));
+  (row.gen_parts || []).forEach((part) => lines.push(`${part.label}. ${part.text} (${part.marks} mark${part.marks === 1 ? '' : 's'})`));
+  return lines.join('\n');
+}
+
+function latexProblems(text) {
+  const problems = [];
+  (String(text).match(/\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)/g) || []).forEach((piece) => {
+    try { window.katex.renderToString(piece.slice(2, -2), { throwOnError: true }); } catch (e) { problems.push(piece.slice(0, 40)); }
+  });
+  return problems;
+}
+
+const plainWords = (text) => latexToPlain(String(text || '')).toLowerCase().match(/[a-z]+|\d+(?:\.\d+)?/g) || [];
+
+function textOverlap(a, b) {
+  const grams = (words) => new Set(words.slice(0, -3).map((w, i) => words.slice(i, i + 4).join(' ')));
+  const x = grams(plainWords(a));
+  const y = grams(plainWords(b));
+  if (!x.size || !y.size) return 0;
+  let same = 0;
+  x.forEach((g) => { if (y.has(g)) same += 1; });
+  return same / Math.min(x.size, y.size);
+}
+
+// 本地检查：公式能渲染、分值对、选择题格式对、知识点规则判断一致、没有照抄范例。
+function localChecks(row, request, examples) {
+  const notes = [];
+  const fatal = [];
+  const text = generatedText(row);
+  const bad = latexProblems([text, row.solution].join('\n'));
+  if (bad.length) notes.push(`有 ${bad.length} 处公式无法渲染`);
+  if (request.question_type === 'multiple choice') {
+    if (row.options.length < 4) fatal.push('选项少于 4 个');
+    const letter = ((row.answers[0] || {}).value || '').trim().toUpperCase().replace(/[^A-E]/g, '');
+    if (!letter || letter.charCodeAt(0) - 65 >= row.options.length) fatal.push('选择题答案不是有效选项');
+  } else {
+    const sum = row.gen_parts.reduce((total, part) => total + (Number(part.marks) || 0), 0);
+    if (sum !== request.marks) fatal.push(`小问分值合计 ${sum} 分，应为 ${request.marks} 分`);
+    if (!row.gen_parts.length) fatal.push('没有小问');
+  }
+  const copied = examples.map((ex) => textOverlap(text, ex.text || generatedText(ex))).reduce((a, b) => Math.max(a, b), 0);
+  if (copied > 0.5) fatal.push('和范例的文字重合太多');
+  const ruled = classifyByRules({ text: row.stem, sub_parts: row.gen_parts.map((p) => ({ ...p })), area: null }, { subject: request.subject, unit: 'Unit 3/4' }, state.taxonomy || DEFAULT_TAXONOMY);
+  if (ruled && ruled.topic !== request.topic) notes.push(`本地规则判为 ${ruled.topic}`);
+  return { notes, fatal };
+}
+
+const sameAnswer = (a, b) => String(a).replace(/\s+|\\[,;!]|\\left|\\right/g, '').toLowerCase() === String(b).replace(/\s+|\\[,;!]|\\left|\\right/g, '').toLowerCase();
+
+// 另开一次调用，只给题目、不给答案，独立做一遍；答案写法不同时再让模型判断是否等价。
+async function independentCheck(row) {
+  const choice = row.question_type === 'multiple choice';
+  const solved = await aiCall([{ text: `Solve this VCE ${row.subject} question carefully. Give only the final answers.
+${choice ? 'Return one answer with label "MC" and the correct letter as the value.' : 'Return one answer per part label.'}
+LaTeX inside \\( \\).
+
+${generatedText(row)}` }], ANSWER_SCHEMA);
+  const mine = new Map(row.answers.map((a) => [String(a.label).replace(/[.\s]/g, ''), a.value]));
+  const theirs = new Map(solved.answers.map((a) => [String(a.label).replace(/[.\s]/g, ''), a.value]));
+  const pending = [];
+  const results = [];
+  mine.forEach((value, label) => {
+    const other = theirs.get(label);
+    if (other === undefined) results.push({ label, same: false, note: '独立解答没有给出这一问' });
+    else if (sameAnswer(value, other)) results.push({ label, same: true });
+    else pending.push({ label, a: value, b: other });
+  });
+  if (pending.length) {
+    const judged = await aiCall([{ text: `For each label, decide whether the two answers are mathematically equivalent (same value or same set, ignoring form). Be strict about different values.
+${pending.map((p) => `${p.label}: A = ${p.a} ; B = ${p.b}`).join('\n')}` }], COMPARE_SCHEMA);
+    pending.forEach((p) => {
+      const verdict = judged.results.find((r) => String(r.label).replace(/[.\s]/g, '') === p.label);
+      results.push({ label: p.label, same: Boolean(verdict && verdict.same), note: verdict && !verdict.same ? `独立解答：${p.b}` : '' });
+    });
+  }
+  return results;
+}
+
+// 出一道题：出题、本地检查、独立重做。本地检查不过就重出一次，还不过就放弃。
+async function generateQuestion(request, examples, spec, onStep) {
+  let lastFatal = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    onStep(attempt ? '重新出题…' : '出题…');
+    const raw = await aiCall([...exampleParts(examples), { text: generationPrompt(spec.text, request) }], QUESTION_SCHEMA);
+    const row = {
+      source_id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      generated: true,
+      status: 'pending',
+      subject: request.subject,
+      unit: 'Unit 3/4',
+      topic: request.topic,
+      question_type: request.question_type,
+      marks: request.marks,
+      difficulty: request.difficulty,
+      difficulty_source: 'target',
+      ai_difficulty: raw.difficulty,
+      stem: raw.stem,
+      options: request.question_type === 'multiple choice' ? raw.options : [],
+      gen_parts: request.question_type === 'multiple choice' ? [] : raw.parts.map((p) => ({ label: p.label, text: p.text, marks: Number(p.marks) || 0 })),
+      answers: raw.answers,
+      solution: raw.solution,
+      marking: raw.marking,
+      skill: raw.skill,
+      based_on: examples.map((ex) => ex.source_id),
+      spec_version: spec.version,
+      model: aiModel(),
+      created: new Date().toISOString(),
+      source: { label: `AI 生成（仿 ${examples[0] ? examples[0].source.label : '题库'}）` },
+    };
+    row.text = generatedText(row);
+    const { notes, fatal } = localChecks(row, request, examples);
+    if (fatal.length) { lastFatal = fatal; continue; }
+    onStep('独立重做核对答案…');
+    const results = await independentCheck(row);
+    const wrong = results.filter((r) => !r.same);
+    row.check = { notes, answers: results };
+    row.check_ok = !wrong.length && !notes.some((n) => n.includes('无法渲染'));
+    return row;
+  }
+  return { failed: true, reasons: lastFatal };
+}
+
+// 题库优先：抽完题后按知识点和难度的缺口安排补题。
+function gapRequests(options, picked, rows) {
+  const ratioTotal = options.ratio.easy + options.ratio.medium + options.ratio.hard || 1;
+  const pool = rows.filter((row) => row.subject === options.subject && options.topics.includes(row.topic));
+  const topicShare = new Map();
+  pool.forEach((row) => topicShare.set(row.topic, (topicShare.get(row.topic) || 0) + questionMinutes(row)));
+  const totalShare = [...topicShare.values()].reduce((a, b) => a + b, 0);
+  const usedTopic = new Map();
+  const usedLevel = new Map();
+  picked.forEach((row) => {
+    usedTopic.set(row.topic, (usedTopic.get(row.topic) || 0) + questionMinutes(row));
+    usedLevel.set(row.difficulty || 'medium', (usedLevel.get(row.difficulty || 'medium') || 0) + questionMinutes(row));
+  });
+  let remaining = options.minutes - picked.reduce((sum, row) => sum + questionMinutes(row), 0);
+  const requests = [];
+  const general = options.subject === 'General Mathematics';
+  while (remaining >= (general ? GENERAL_CHOICE_MINUTES : MINUTES_PER_MARK) && requests.length < 30) {
+    const topic = options.topics.map((t) => [t, options.minutes * ((topicShare.get(t) || 1) / (totalShare || options.topics.length)) - (usedTopic.get(t) || 0)])
+      .sort((a, b) => b[1] - a[1])[0][0];
+    const level = ['easy', 'medium', 'hard'].map((l) => [l, options.minutes * options.ratio[l] / ratioTotal - (usedLevel.get(l) || 0)])
+      .sort((a, b) => b[1] - a[1])[0][0];
+    let type = options.types.includes('multiple choice') ? 'multiple choice' : options.types[0];
+    let marks = 1;
+    const longest = Math.floor(remaining / MINUTES_PER_MARK);
+    if (type !== 'multiple choice' || (remaining > 20 && options.types.length > 1 && !general)) {
+      type = options.types.find((t) => t !== 'multiple choice') || type;
+      marks = type === 'short answer' ? Math.min(3, longest) : Math.min(8, longest);
+      if (marks < 2) { type = 'multiple choice'; marks = 1; }
+    }
+    if (type === 'multiple choice' && !options.types.includes('multiple choice')) break;
+    const request = { subject: options.subject, topic, difficulty: level, question_type: type, marks };
+    requests.push(request);
+    const minutes = questionMinutes(request);
+    remaining -= minutes;
+    usedTopic.set(topic, (usedTopic.get(topic) || 0) + minutes);
+    usedLevel.set(level, (usedLevel.get(level) || 0) + minutes);
+  }
+  return requests;
+}
+
+// 范例：同科目，优先同知识点、同题型、同难度、真题和已通过的题，尽量不重复用同一道。
+// 同知识点的题不够时，用同科目的其他题补足，只让 AI 学风格。
+function pickExamples(request, rows, recentlyUsed) {
+  const usable = rows.filter((row) => row.subject === request.subject && row.source_id !== (request.template || {}).source_id &&
+    (!row.generated || row.status === 'approved') && (row.snapshot || row.generated));
+  const score = (row) => (row.topic === request.topic ? 6 : 0) + (row.question_type === request.question_type ? 2 : 0) +
+    ((row.difficulty || 'medium') === request.difficulty ? 1 : 0) + (row.generated ? 0 : 0.5) -
+    (recentlyUsed.has(row.source_id) ? 3 : 0) + Math.random() * 0.5;
+  return usable.sort((a, b) => score(b) - score(a)).slice(0, 3);
+}
+
+async function runGeneration(requests, onProgress) {
+  const spec = await currentSpec();
+  const rows = paperState.rows;
+  const used = new Set();
+  const made = [];
+  const failed = [];
+  let stopped = '';
+  aiState.running = true;
+  aiState.abort = new AbortController();
+  try {
+    for (let i = 0; i < requests.length; i++) {
+      const request = requests[i];
+      const examples = request.template ? [request.template, ...pickExamples(request, rows, used).slice(0, 2)] : pickExamples(request, rows, used);
+      examples.forEach((ex) => used.add(ex.source_id));
+      let result;
+      try {
+        result = await generateQuestion(request, examples, spec, (step) => onProgress(i, requests.length, step));
+      } catch (e) {
+        // 停止或出错时，已经出好的题保留下来。
+        stopped = aiState.abort.signal.aborted ? '已停止 AI 出题。' : `AI 出题中断：${e.message || e}`;
+        break;
+      }
+      if (result.failed) {
+        failed.push(`${request.topic}：${result.reasons.join('、')}`);
+        continue;
+      }
+      await bankRequest('readwrite', (store) => store.put(result));
+      made.push(result);
+    }
+  } finally {
+    aiState.running = false;
+    aiState.abort = null;
+  }
+  return { made, failed, stopped };
+}
+
+async function reviewGenerated(row, decision, reasons, note) {
+  row.status = decision === 'approve' ? 'approved' : 'rejected';
+  row.reviewed = new Date().toISOString();
+  await bankRequest('readwrite', (store) => store.put(row));
+  await bankRequest('readwrite', (store) => store.add({
+    question: row.source_id, decision, reasons, note, subject: row.subject, topic: row.topic,
+    question_type: row.question_type, spec_version: row.spec_version, created: row.reviewed, used: false,
+  }), 'feedback');
+}
+
+/* ---------- AI 出题的页面部分 ---------- */
+const GEN_STATUS = { pending: '待审核', approved: '已通过', rejected: '已退回' };
+const AI_COST_PER_QUESTION = 0.05; // 粗估：出题、独立重做、必要时比对，共 2–3 次调用，按 gemini-3.6-flash 现价。以实际用量为准。
+
+function generatedBody(row, forPrint) {
+  const body = el('div', 'gen-body');
+  body.append(el('div', 'qtext', row.stem));
+  if (row.options.length) {
+    const list = el('ol', 'gen-options');
+    row.options.forEach((option) => list.append(el('li', 'qtext', option)));
+    body.append(list);
+  }
+  if (row.gen_parts.length) {
+    const list = el('ol', 'parts');
+    row.gen_parts.forEach((part) => {
+      const item = el('li');
+      item.append(el('span', 'pl', `${part.label}.`), el('span', 'qtext', part.text), el('span', 'pm', `${part.marks} 分`));
+      list.append(item);
+    });
+    body.append(list);
+  }
+  if (!forPrint) {
+    const more = el('details', 'gen-answer');
+    more.append(el('summary', '', '答案、解答和评分要点'));
+    more.append(el('div', 'qtext', `答案：${row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${a.value}`).join('；')}`));
+    more.append(el('div', 'qtext', row.solution), el('div', 'qtext hint', `评分：${row.marking}`));
+    if (row.skill) more.append(el('div', 'hint', `考查：${row.skill}`));
+    body.append(more);
+  }
+  return body;
+}
+
+function checkSummary(row) {
+  if (!row.check) return '';
+  const wrong = row.check.answers.filter((a) => !a.same);
+  const parts = [];
+  parts.push(wrong.length ? `独立重做有 ${wrong.length} 处答案不一致：${wrong.map((a) => `${a.label} ${a.note || ''}`).join('；')}` : '独立重做的答案一致');
+  parts.push(...row.check.notes);
+  return parts.join('。');
+}
+
+function reviewControls(row, onDone) {
+  const wrap = el('div', 'review');
+  if (row.status !== 'pending') {
+    wrap.append(el('span', 'hint', `审核：${GEN_STATUS[row.status]}`));
+    return wrap;
+  }
+  const approve = el('button', 'primary', '通过，存入题库');
+  approve.type = 'button';
+  const reject = el('button', '', '退回');
+  reject.type = 'button';
+  const reasons = el('div', 'checks reasons');
+  reasons.hidden = true;
+  GEN_REASONS.forEach((reason) => {
+    const label = el('label', 'check');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.value = reason;
+    label.append(box, document.createTextNode(` ${reason}`));
+    reasons.append(label);
+  });
+  const note = el('input');
+  note.type = 'text';
+  note.placeholder = '补充说明（可选），会用来改进出题规范';
+  note.hidden = true;
+  const confirmReject = el('button', '', '确认退回');
+  confirmReject.type = 'button';
+  confirmReject.hidden = true;
+  approve.addEventListener('click', async () => {
+    await reviewGenerated(row, 'approve', [], note.value.trim());
+    onDone();
+  });
+  reject.addEventListener('click', () => {
+    reasons.hidden = false;
+    note.hidden = false;
+    confirmReject.hidden = false;
+  });
+  confirmReject.addEventListener('click', async () => {
+    const picked = [...reasons.querySelectorAll('input:checked')].map((box) => box.value);
+    if (!picked.length) {
+      showAlert($('paperWarn'), '请选退回原因', '至少勾选一个原因，规范才能据此改进。');
+      return;
+    }
+    await reviewGenerated(row, 'reject', picked, note.value.trim());
+    onDone();
+  });
+  const buttons = el('div', 'row');
+  buttons.append(approve, reject);
+  wrap.append(buttons, reasons, note, confirmReject);
+  return wrap;
+}
+
+async function generateForPaper() {
+  const options = paperOptions();
+  const mode = document.querySelector('input[name="pMode"]:checked').value;
+  let requests;
+  let base = [];
+  if (mode === 'new') {
+    const real = paperState.rows.filter((row) => !row.generated);
+    const blueprint = assemblePaper(real, options, seededRandom(paperState.seed)).picked;
+    requests = blueprint.map((row) => ({
+      subject: row.subject, topic: row.topic, difficulty: row.difficulty || 'medium', question_type: row.question_type, marks: row.marks, template: row,
+    }));
+  } else {
+    const result = assemblePaper(paperState.rows, options, seededRandom(paperState.seed));
+    base = result.picked;
+    requests = gapRequests(options, base, paperState.rows);
+  }
+  if (!requests.length) {
+    paperState.picked = base;
+    paperState.options = options;
+    paperState.warnings = mode === 'new' ? ['题库里没有符合条件的题，AI 没有可以模仿的范例。'] : ['题库的题已经够了，不需要 AI 补题。'];
+    renderPaperView();
+    return;
+  }
+  if (!aiKey()) {
+    paperState.picked = base;
+    paperState.options = options;
+    paperState.warnings = ['还没有 Gemini Key：在左侧“AI 服务”选 Google Gemini 并填写 Key，再用 AI 出题。下面先列出题库里能选到的题。'];
+    renderPaperView();
+    return;
+  }
+  const cost = (requests.length * AI_COST_PER_QUESTION).toFixed(2);
+  if (!window.confirm(`将由 AI 出 ${requests.length} 道题，每道题出完后会独立重做一遍核对答案。\n预计费用约 $${cost}（粗估，以实际用量为准）。\n继续吗？`)) return;
+  setPaperBusy(true);
+  const before = aiState.usage;
+  try {
+    const { made, failed, stopped } = await runGeneration(requests, (index, total, step) => {
+      $('paperProgress').textContent = `AI 出题中：第 ${index + 1} / ${total} 题，${step}`;
+    });
+    paperState.picked = [...base, ...made];
+    paperState.options = options;
+    paperState.warnings = [];
+    if (stopped) paperState.warnings.push(`${stopped}已出好的 ${made.length} 道题保留在下面，并已存进题库待审核。`);
+    if (failed.length) paperState.warnings.push(`${failed.length} 道题两次都没通过本地检查，已放弃：${failed.join('；')}。`);
+    const flagged = made.filter((row) => !row.check_ok).length;
+    if (flagged) paperState.warnings.push(`${flagged} 道 AI 题核对时发现问题，已标为“需复核”，请重点看。`);
+    const spent = mergeUsage(aiState.usage, { promptTokenCount: -before.promptTokenCount, candidatesTokenCount: -before.candidatesTokenCount, thoughtsTokenCount: -(before.thoughtsTokenCount || 0), totalTokenCount: -before.totalTokenCount });
+    paperState.spent = spent;
+  } catch (e) {
+    paperState.warnings = [`AI 出题失败：${e.message || e}`];
+  } finally {
+    setPaperBusy(false);
+    paperState.rows = await bankRows();
+    renderPaperView();
+  }
+}
+
+function setPaperBusy(busy) {
+  ['pBuild', 'pAgain'].forEach((id) => { $(id).disabled = busy; });
+  $('pStop').hidden = !busy;
+  $('paperProgress').hidden = !busy;
+  if (!busy) $('paperProgress').textContent = '';
+}
+
+/* 出题要求页 */
+async function openSpecView() {
+  const spec = await currentSpec();
+  const list = await specList();
+  $('specText').value = spec.text;
+  $('specVersion').textContent = spec.version ? `当前是第 ${spec.version} 版（${spec.created.slice(0, 10)}）${spec.note ? `：${spec.note}` : ''}` : '当前是默认规范，还没有保存过。';
+  const select = $('specHistory');
+  select.textContent = '';
+  list.forEach((item) => select.append(new Option(`第 ${item.version} 版 · ${item.created.slice(0, 10)}${item.note ? ` · ${item.note}` : ''}`, String(item.version))));
+  $('specHistoryRow').hidden = list.length < 2;
+  $('specKey').textContent = aiKey() ? `Gemini Key 已设置，模型 ${aiModel()}。` : 'Gemini Key 还没设置：在左侧“AI 服务”选 Google Gemini 并填写 Key。整理规范和 AI 出题都要用到。';
+  const rows = await bankRows();
+  const generated = rows.filter((row) => row.generated);
+  const feedback = (await feedbackRows()).filter((row) => !row.used);
+  $('specStats').textContent = `AI 出的题：待审核 ${generated.filter((r) => r.status === 'pending').length}，已通过 ${generated.filter((r) => r.status === 'approved').length}，已退回 ${generated.filter((r) => r.status === 'rejected').length}。还没用来改规范的审核意见 ${feedback.length} 条。`;
+  $('specFromFeedback').disabled = feedback.length < 5;
+  paperState.pendingFeedback = null;
+}
+
+async function specAction(button, work) {
+  button.disabled = true;
+  $('specMessage').hidden = true;
+  try {
+    await work();
+  } catch (e) {
+    showAlert($('specMessage'), e.title || '失败', e.message || String(e));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function markFeedbackUsed(ids, version) {
+  await bankRequest('readwrite', (store) => {
+    ids.forEach((id) => {
+      const request = store.get(id);
+      request.onsuccess = () => {
+        if (request.result) store.put({ ...request.result, used: version });
+      };
+    });
+    return { result: null };
+  }, 'feedback');
+}
+
+function initAiUi() {
+  $('tabSpec').addEventListener('click', () => showView('spec'));
+  $('specSave').addEventListener('click', () => specAction($('specSave'), async () => {
+    const version = await saveSpec($('specText').value.trim(), $('specNote').value.trim());
+    if (paperState.pendingFeedback) {
+      await markFeedbackUsed(paperState.pendingFeedback, version);
+    }
+    $('specNote').value = '';
+    await openSpecView();
+    showAlert($('specMessage'), '已保存', `第 ${version} 版规范已保存，以后 AI 出题都按这一版。`);
+  }));
+  $('specRestore').addEventListener('click', () => specAction($('specRestore'), async () => {
+    const chosen = (await specList()).find((item) => String(item.version) === $('specHistory').value);
+    if (!chosen) return;
+    $('specText').value = chosen.text;
+    $('specNote').value = `恢复第 ${chosen.version} 版`;
+    showAlert($('specMessage'), '已载入旧版本', '确认无误后点“保存为新版本”才会生效。');
+  }));
+  $('specMerge').addEventListener('click', () => specAction($('specMerge'), async () => {
+    const request = $('specRequest').value.trim();
+    if (!request) throw new UserError('还没写要求', '在上面的框里写下你的出题要求，再让 AI 整理。');
+    const merged = await mergeRequirements($('specText').value, request);
+    $('specText').value = merged.text;
+    $('specNote').value = '按老师要求整理';
+    showAlert($('specMessage'), 'AI 已整理，请检查', `${merged.summary} 确认后点“保存为新版本”。`);
+  }));
+  $('specFromFeedback').addEventListener('click', () => specAction($('specFromFeedback'), async () => {
+    const result = await suggestFromFeedback($('specText').value);
+    $('specText').value = result.text;
+    $('specNote').value = '根据审核意见修改';
+    paperState.pendingFeedback = result.ids;
+    showAlert($('specMessage'), 'AI 提出了修改，请检查', `${result.summary} 确认后点“保存为新版本”。`);
+  }));
+  $('specReset').addEventListener('click', () => {
+    $('specText').value = DEFAULT_SPEC;
+    $('specNote').value = '恢复默认';
+  });
+  $('pStop').addEventListener('click', () => { if (aiState.abort) aiState.abort.abort(); });
+  document.querySelectorAll('input[name="pMode"]').forEach((radio) => radio.addEventListener('change', () => {
+    $('pModeHint').textContent = radio.value === 'bank' ? '' : 'AI 出的题先标为“待审核”，老师通过后才进题库，以后组卷才会被抽到。';
+  }));
 }
 
 /* ---------- 非 AI 模式：关键词分类 ---------- */
@@ -6223,18 +6956,23 @@ let bankTimer = null;
 
 function openBank() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('vceQuestionBank', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('questions', { keyPath: 'source_id' });
+    const request = indexedDB.open('vceQuestionBank', AI_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('questions')) db.createObjectStore('questions', { keyPath: 'source_id' });
+      if (!db.objectStoreNames.contains('specs')) db.createObjectStore('specs', { keyPath: 'version' });
+      if (!db.objectStoreNames.contains('feedback')) db.createObjectStore('feedback', { keyPath: 'id', autoIncrement: true });
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-async function bankRequest(mode, action) {
+async function bankRequest(mode, action, storeName = 'questions') {
   const db = await openBank();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction('questions', mode);
-    const result = action(transaction.objectStore('questions'));
+    const transaction = db.transaction(storeName, mode);
+    const result = action(transaction.objectStore(storeName));
     transaction.oncomplete = () => { db.close(); resolve(result.result); };
     transaction.onerror = () => { db.close(); reject(transaction.error); };
   });
@@ -6280,10 +7018,12 @@ function bankSummary(rows) {
 }
 
 async function renderBank() {
-  const rows = await bankRows();
+  const all = await bankRows();
+  const rows = all.filter((row) => !row.generated);
+  const approved = all.filter((row) => row.generated && row.status === 'approved').length;
   $('bank').hidden = !rows.length;
   const papers = new Set(rows.map((row) => row.source.file_sha256 || row.source.paper_title));
-  $('bankTitle').textContent = `题库：${papers.size} 份试卷，${rows.length} 道题`;
+  $('bankTitle').textContent = `题库：${papers.size} 份试卷，${rows.length} 道题${approved ? `，另有 AI 出的题 ${approved} 道（已通过）` : ''}`;
   const body = $('bankBody');
   body.textContent = '';
   [...bankSummary(rows)].sort((a, b) => b[1].count - a[1].count).forEach(([subject, group]) => {
@@ -7123,6 +7863,7 @@ function init() {
   $('pAgain').addEventListener('click', () => buildPaper(true));
   $('pPrint').addEventListener('click', printPaper);
   $('pExport').addEventListener('click', exportPaperList);
+  initAiUi();
   $('bankCsv').addEventListener('click', exportBankCsv);
   $('bankClear').addEventListener('click', clearBank);
   renderBank().catch((e) => console.warn('题库读取失败', e));
