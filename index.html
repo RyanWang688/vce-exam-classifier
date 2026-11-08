@@ -5668,7 +5668,7 @@ Output rules:
 - "answers": the final answer for ${choice ? 'label "MC", value = the correct letter' : 'each part label'}.
 - "solution": a complete worked solution. "marking": which step earns each mark.
 - "skill": one sentence on what the question tests. "difficulty": your own estimate.
-- "figure": ${request.wantFigure ? 'REQUIRED. ' : ''}only when the question needs a graph, otherwise null. Give the axis ranges and each curve as an expression in x that math.js can evaluate (e.g. "x^3 - 3*x", "2*sin(pi*x/4)", "log(x - 1)" for the natural logarithm, "exp(-x)"), with an optional domain, plus labelled points and dashed asymptote lines. The graph is drawn from this data, so it must match the question exactly. Never describe a graph that is not in "figure".
+- "figure": ${request.wantFigure ? 'REQUIRED. ' : ''}only when the question needs a graph, otherwise null. Give the axis ranges and each curve as an expression in x that math.js can evaluate (e.g. "x^3 - 3*x", "2*sin(pi*x/4)", "log(x - 1)" for the natural logarithm, "exp(-x)"), with an optional domain, plus labelled points and dashed asymptote lines. The graph is drawn from this data, so it must match the question exactly. Never describe a graph that is not in "figure". Axes are drawn automatically: do not add curves or dashed lines along y = 0 or x = 0. Draw each curve over its whole domain unless the question asks students to complete the graph. Never label a point whose coordinates students are asked to find. Use finite numbers for "from" and "to", or leave them null.
 - LaTeX inside \\( \\) or \\[ \\]. Plain text otherwise: no Markdown, no asterisks or bullet symbols. To stress a word, write it in capitals (e.g. NOT), as VCAA does in bold.`;
 }
 
@@ -5708,6 +5708,8 @@ function localChecks(row, request, examples) {
   const bad = latexProblems([text, row.solution].join('\n'));
   if (bad.length) notes.push(`有 ${bad.length} 处公式无法渲染`);
   if (request.wantFigure && !row.figure) fatal.push('要求带图，但没有给出图形');
+  const leaks = figureLeaks(row);
+  if (leaks.length) notes.push(`图上标出的点 ${leaks.join('、')} 正是答案`);
   checkFigure(row.figure).forEach((problem) => fatal.push(`图形：${problem}`));
   if (request.question_type === 'multiple choice') {
     if (row.options.length < 4) fatal.push('选项少于 4 个');
@@ -5787,7 +5789,7 @@ async function generateQuestion(request, examples, spec, onStep) {
       options: request.question_type === 'multiple choice' ? raw.options : [],
       gen_parts: request.question_type === 'multiple choice' ? [] : raw.parts.map((p) => ({ label: p.label, text: p.text, marks: Number(p.marks) || 0 })),
       answers: raw.answers,
-      figure: raw.figure || null,
+      figure: tidyFigure(raw.figure),
       variations: request.variations || [],
       solution: raw.solution,
       marking: raw.marking,
@@ -5809,7 +5811,7 @@ async function generateQuestion(request, examples, spec, onStep) {
     const results = await independentCheck(row);
     const wrong = results.filter((r) => !r.same);
     row.check = { notes, answers: results };
-    row.check_ok = !wrong.length && !notes.some((n) => n.includes('无法渲染'));
+    row.check_ok = !wrong.length && !notes.some((n) => n.includes('无法渲染') || n.includes('正是答案'));
     return row;
   }
   return { failed: true, reasons: lastFatal };
@@ -5949,6 +5951,29 @@ function figureFunction(expr) {
   };
 }
 
+// 定义域端点：AI 可能给出 null 或无穷大，一律按坐标范围处理。
+const domainFrom = (item, figure) => Math.max(Number.isFinite(item.from) ? item.from : figure.x_min, figure.x_min);
+const domainTo = (item, figure) => Math.min(Number.isFinite(item.to) ? item.to : figure.x_max, figure.x_max);
+
+// 去掉和坐标轴重合的线（y = 0、x = 0）：坐标轴本来就会画。
+function tidyFigure(figure) {
+  if (!figure) return null;
+  const onAxis = (expr) => /^\s*0(?:\.0+)?\s*$/.test(String(expr));
+  return {
+    ...figure,
+    functions: (figure.functions || []).filter((item) => !onAxis(item.expr)),
+    vertical: (figure.vertical || []).filter((x) => x !== 0),
+    horizontal: (figure.horizontal || []).filter((y) => y !== 0),
+  };
+}
+
+// 图上标出的点正好是要学生求的答案，会把答案告诉学生。
+function figureLeaks(row) {
+  if (!row.figure) return [];
+  const answers = row.answers.map((a) => String(a.value)).join(' ').replace(/\s+/g, '');
+  return (row.figure.points || []).filter((point) => answers.includes(`(${point.x},${point.y})`)).map((point) => `(${point.x}, ${point.y})`);
+}
+
 // 图能不能画：坐标范围合理，每个函数能求值，并且在范围内有可见的部分。
 function checkFigure(figure) {
   if (!figure) return [];
@@ -5957,8 +5982,8 @@ function checkFigure(figure) {
   (figure.functions || []).forEach((item) => {
     try {
       const f = figureFunction(item.expr);
-      const from = item.from ?? figure.x_min;
-      const to = item.to ?? figure.x_max;
+      const from = domainFrom(item, figure);
+      const to = domainTo(item, figure);
       let visible = 0;
       for (let i = 0; i <= 50; i++) {
         const y = f(from + (to - from) * i / 50);
@@ -6016,8 +6041,8 @@ function figureSvg(figure) {
   (figure.functions || []).forEach((item) => {
     let f;
     try { f = figureFunction(item.expr); } catch (e) { return; }
-    const from = Math.max(item.from ?? figure.x_min, figure.x_min);
-    const to = Math.min(item.to ?? figure.x_max, figure.x_max);
+    const from = domainFrom(item, figure);
+    const to = domainTo(item, figure);
     const steps = 600;
     let path = '';
     let previous = null;
@@ -6054,7 +6079,7 @@ function figureSvg(figure) {
 function figureText(figure) {
   if (!figure) return '';
   const lines = [`[Graph: x from ${figure.x_min} to ${figure.x_max}, y from ${figure.y_min} to ${figure.y_max}]`];
-  (figure.functions || []).forEach((item) => lines.push(`curve${item.label ? ` ${item.label}` : ''}: y = ${item.expr}${item.from != null || item.to != null ? ` for ${item.from ?? figure.x_min} <= x <= ${item.to ?? figure.x_max}` : ''}${item.dashed ? ' (dashed)' : ''}`));
+  (figure.functions || []).forEach((item) => lines.push(`curve${item.label ? ` ${item.label}` : ''}: y = ${item.expr} for ${domainFrom(item, figure)} <= x <= ${domainTo(item, figure)}${item.dashed ? ' (dashed)' : ''}`));
   (figure.points || []).forEach((point) => lines.push(`point${point.label ? ` ${point.label}` : ''} (${point.x}, ${point.y})${point.open ? ' open circle' : ''}`));
   (figure.vertical || []).forEach((x) => lines.push(`dashed line x = ${x}`));
   (figure.horizontal || []).forEach((y) => lines.push(`dashed line y = ${y}`));

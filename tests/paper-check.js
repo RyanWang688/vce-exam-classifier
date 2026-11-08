@@ -77,6 +77,11 @@
     const svg = figureSvg(graph);
     check('画出两条曲线和一个点', svg.querySelectorAll('path').length === 2 && svg.querySelectorAll('circle').length === 1);
     check('题目文字里带上图形数据', figureText(graph).includes('y = x^3 - 3*x'));
+    // 真实出题时遇到的：端点是无穷大、多画了和坐标轴重合的线、图上标出了答案。
+    check('端点是无穷大也能检查', checkFigure({ ...graph, functions: [{ expr: '4 - 0.25*x^2', from: 0, to: Infinity }] }).length === 0);
+    const tidied = tidyFigure({ ...graph, functions: [...graph.functions, { expr: '0', dashed: true }], vertical: [0, 1], horizontal: [0] });
+    check('去掉和坐标轴重合的线', tidied.functions.length === 2 && tidied.vertical.length === 1 && !tidied.horizontal.length);
+    check('发现图上标出了答案', figureLeaks({ figure: { points: [{ x: 3, y: 0 }] }, answers: [{ label: 'c', value: '(-2, 0), (3, 0)' }] }).length === 1);
     const needFigure = localChecks({ ...good, figure: null }, { ...request, wantFigure: true }, []);
     check('要求带图却没给图时拒绝', needFigure.fatal.length > 0);
   } else {
