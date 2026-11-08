@@ -67,6 +67,22 @@
   check('答案写法不同也算相同', sameAnswer('\\left( 2 \\right)', '(2)'));
   check('不同的答案不算相同', !sameAnswer('2', '3'));
 
+  // 带图的题：图形数据检查和本地画图。
+  if (window.math) {
+    const graph = { x_min: -3, x_max: 3, y_min: -5, y_max: 5, functions: [{ expr: 'x^3 - 3*x' }, { expr: '1/(x-1)', dashed: true }], points: [{ x: 1, y: -2 }], vertical: [1] };
+    check('正常的图通过检查', checkFigure(graph).length === 0);
+    check('算不出的函数被拦下', checkFigure({ ...graph, functions: [{ expr: 'x^^2' }] }).length > 0);
+    check('看不到的曲线被拦下', checkFigure({ ...graph, functions: [{ expr: 'x + 100' }] }).length > 0);
+    check('坐标范围不对被拦下', checkFigure({ ...graph, x_max: -4 }).length > 0);
+    const svg = figureSvg(graph);
+    check('画出两条曲线和一个点', svg.querySelectorAll('path').length === 2 && svg.querySelectorAll('circle').length === 1);
+    check('题目文字里带上图形数据', figureText(graph).includes('y = x^3 - 3*x'));
+    const needFigure = localChecks({ ...good, figure: null }, { ...request, wantFigure: true }, []);
+    check('要求带图却没给图时拒绝', needFigure.fatal.length > 0);
+  } else {
+    failures.push('math.js 没有加载，跳过画图检查');
+  }
+
   window.paperCheckReport = failures;
   console.log(failures.length ? `组卷检查失败：${failures.join('；')}` : '组卷检查全部通过');
 })();

@@ -19,12 +19,18 @@
       const mc = /Write ONE multiple-choice/.test(t);
       const marks = Number(/worth (\d+) mark/.exec(t)[1]);
       __calls.push(`gen${mc ? 'MC' : marks}:img${imgs}`);
-      if (mc) return reply({ stem: `Let \\(X \\sim \\mathrm{Bi}(10, 0.${n % 9 + 1})\\). Find \\(\\Pr(X=0)\\) correct to two decimal places. (q${n})`, options: ['0.11', '0.35', '0.20', '0.05', '0.48'], parts: [], answers: [{ label: 'MC', value: 'B' }], solution: 'Use \\(\\Pr(X=0)=(1-p)^{10}\\).', marking: '1 mark', skill: 'binomial probability', difficulty: 'easy' });
+      // 要求带图时给一张三次函数图；“bad figure” 模式给一张画不出来的图，用来测本地检查。
+      const figure = /"figure": REQUIRED/.test(t) ? (window.__badFigure
+        ? { x_min: -3, x_max: 3, y_min: -5, y_max: 5, functions: [{ expr: 'x^^2' }] }
+        : { x_min: -3, x_max: 3, y_min: -5, y_max: 5, functions: [{ expr: 'x^3 - 3*x', label: 'y = f(x)' }, { expr: '1/(x-1)', dashed: true }], points: [{ x: 1, y: -2, label: '(1, -2)' }, { x: -1, y: 2, label: '(-1, 2)' }], vertical: [1] })
+        : null;
+      if (figure) __calls.push('figure');
+      if (mc) return reply({ figure, stem: `Let \\(X \\sim \\mathrm{Bi}(10, 0.${n % 9 + 1})\\). Find \\(\\Pr(X=0)\\) correct to two decimal places. (q${n})`, options: ['0.11', '0.35', '0.20', '0.05', '0.48'], parts: [], answers: [{ label: 'MC', value: 'B' }], solution: 'Use \\(\\Pr(X=0)=(1-p)^{10}\\).', marking: '1 mark', skill: 'binomial probability', difficulty: 'easy' });
       const parts = [];
       let left = marks;
       let i = 0;
       while (left > 0) { const m = Math.min(left, 2); parts.push({ label: String.fromCharCode(97 + i), text: `Find \\(f'(${i + 1})\\) for \\(f(x)=x^{${i + 2}}\\). (q${n})`, marks: m }); left -= m; i += 1; }
-      return reply({ stem: `Consider the function \\(f(x)=x^2\\). (q${n})`, options: [], parts, answers: parts.map((p, j) => ({ label: p.label, value: String(j + 2) })), solution: 'Differentiate.', marking: '1 mark each step', skill: 'differentiation', difficulty: 'medium' });
+      return reply({ figure, stem: `Consider the function \\(f(x)=x^2\\). (q${n})`, options: [], parts, answers: parts.map((p, j) => ({ label: p.label, value: String(j + 2) })), solution: 'Differentiate.', marking: '1 mark each step', skill: 'differentiation', difficulty: 'medium' });
     }
     if (/Solve this VCE/.test(t)) {
       __calls.push('solve');

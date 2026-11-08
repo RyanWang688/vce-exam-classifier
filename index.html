@@ -11,6 +11,7 @@
 <!-- PDF.js 渲染 PDF 页面用于截图；JSZip 打包含图片的导出。加载失败时分类功能不受影响 -->
 <script defer src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjs@12.4.2/lib/browser/math.js"></script>
 <!-- Tesseract.js 只在 PDF 缺文字层时使用，第一次会下载约 10MB 的识别数据 -->
 <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <style>
@@ -200,6 +201,13 @@
   .gen-answer { margin-top: 8px; }
   .gen-answer .qtext { margin-top: 4px; }
   .review { margin-top: 10px; display: grid; gap: 6px; }
+  .gen-figure { display: block; width: 100%; max-width: 520px; height: auto; margin: 10px auto; background: #fff; color: #111; }
+  .gen-figure text { fill: #111; }
+  #variantPanel summary { cursor: pointer; }
+  .picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; max-height: 520px; overflow: auto; margin-top: 8px; }
+  .pick { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; align-content: start; background: var(--panel); }
+  .pick-img { width: 100%; height: auto; background: #fff; }
+  .chip-x { padding: 0 6px; margin-left: 4px; line-height: 1.2; }
   .tag.warn { background: var(--warn-soft); color: var(--warn-ink, inherit); }
   @media print {
     body > *:not(#printSheet) { display: none !important; }
@@ -390,6 +398,27 @@
         </div>
         <p id="paperProgress" class="hint" hidden></p>
       </div>
+      <details id="variantPanel" class="panel paper-form">
+        <summary><strong>按样板出题（特殊题型）</strong> <span class="hint">挑 1–3 道题当样板，勾选怎么变，AI 出新题</span></summary>
+        <div>
+          <p class="hint" id="vEmpty">还没有样板：点下面“从题库挑样板”，或在组卷结果里点某题的“按这题出变式”。</p>
+          <div id="vTemplates" class="row"></div>
+          <div class="row" style="margin-top:6px"><button id="vShowPicker" type="button">从题库挑样板</button></div>
+          <div id="vPickerWrap" hidden>
+            <label class="field"><span>知识点</span><select id="vPickTopic"></select></label>
+            <div id="vPicker" class="picker"></div>
+          </div>
+        </div>
+        <fieldset class="field"><legend>怎么变</legend><div id="vOptions" class="checks"></div>
+          <select id="vCombineTopic" aria-label="要组合的知识点"></select>
+        </fieldset>
+        <div class="paper-grid">
+          <label class="field"><span>题型</span><select id="vType"></select></label>
+          <label class="field"><span>分值（大题、简答题）</span><input id="vMarks" type="number" min="1" max="20" placeholder="默认同样板"></label>
+          <label class="field"><span>出几道</span><input id="vCount" type="number" min="1" max="5" value="2"></label>
+        </div>
+        <div class="row"><button id="vRun" class="primary" type="button" disabled>按样板出题</button></div>
+      </details>
       <div id="paperWarn" class="alert warn" hidden></div>
       <p id="paperSummary" class="paper-summary"></p>
       <p id="paperCost" class="hint"></p>
@@ -5342,7 +5371,10 @@ function renderPaperView() {
     remove.type = 'button';
     remove.addEventListener('click', () => { paperState.picked.splice(index, 1); renderPaperView(); });
     const tools = el('div', 'row');
-    tools.append(level, swap, remove);
+    const variant = el('button', '', '按这题出变式');
+    variant.type = 'button';
+    variant.addEventListener('click', () => addTemplate(row));
+    tools.append(level, swap, remove, variant);
     const note = row.difficulty_source === 'vcaa-report' ? ` · 难度来自考试报告（得分率 ${Math.round(row.facility * 100)}%）` : '';
     if (row.generated) {
       head.append(el('span', `tag ${row.check_ok ? '' : 'warn'}`, row.check_ok ? 'AI 出题 · 已核对' : 'AI 出题 · 需复核'));
@@ -5627,6 +5659,7 @@ Write ONE ${TYPE_NAMES[request.question_type]} worth ${request.marks} mark(s).
 Topic (VCAA Study Design): ${request.topic}.
 Target difficulty: ${DIFFICULTY_MEANING[request.difficulty] || 'medium'}.
 ${request.template ? 'Example 1 is the question to imitate: test the same skill at the same level, with a new context and new numbers. Do not reuse its wording.' : 'Use the examples only to match VCAA style. Do not reuse their wording or numbers.'}
+${(request.variations || []).map((note) => `- ${note}`).join('\n')}
 
 Output rules:
 - "stem": the question text. ${choice ? 'Do not put the options in the stem.' : 'For questions with parts, the stem is the shared lead-in.'}
@@ -5635,11 +5668,13 @@ Output rules:
 - "answers": the final answer for ${choice ? 'label "MC", value = the correct letter' : 'each part label'}.
 - "solution": a complete worked solution. "marking": which step earns each mark.
 - "skill": one sentence on what the question tests. "difficulty": your own estimate.
+- "figure": ${request.wantFigure ? 'REQUIRED. ' : ''}only when the question needs a graph, otherwise null. Give the axis ranges and each curve as an expression in x that math.js can evaluate (e.g. "x^3 - 3*x", "2*sin(pi*x/4)", "log(x - 1)" for the natural logarithm, "exp(-x)"), with an optional domain, plus labelled points and dashed asymptote lines. The graph is drawn from this data, so it must match the question exactly. Never describe a graph that is not in "figure".
 - LaTeX inside \\( \\) or \\[ \\]. Plain text otherwise: no Markdown, no asterisks or bullet symbols. To stress a word, write it in capitals (e.g. NOT), as VCAA does in bold.`;
 }
 
 function generatedText(row) {
   const lines = [row.stem || ''];
+  if (row.figure) lines.push(figureText(row.figure));
   (row.options || []).forEach((option, index) => lines.push(`${String.fromCharCode(65 + index)}. ${option}`));
   (row.gen_parts || []).forEach((part) => lines.push(`${part.label}. ${part.text} (${part.marks} mark${part.marks === 1 ? '' : 's'})`));
   return lines.join('\n');
@@ -5672,6 +5707,8 @@ function localChecks(row, request, examples) {
   const text = generatedText(row);
   const bad = latexProblems([text, row.solution].join('\n'));
   if (bad.length) notes.push(`有 ${bad.length} 处公式无法渲染`);
+  if (request.wantFigure && !row.figure) fatal.push('要求带图，但没有给出图形');
+  checkFigure(row.figure).forEach((problem) => fatal.push(`图形：${problem}`));
   if (request.question_type === 'multiple choice') {
     if (row.options.length < 4) fatal.push('选项少于 4 个');
     const letter = ((row.answers[0] || {}).value || '').trim().toUpperCase().replace(/[^A-E]/g, '');
@@ -5750,6 +5787,8 @@ async function generateQuestion(request, examples, spec, onStep) {
       options: request.question_type === 'multiple choice' ? raw.options : [],
       gen_parts: request.question_type === 'multiple choice' ? [] : raw.parts.map((p) => ({ label: p.label, text: p.text, marks: Number(p.marks) || 0 })),
       answers: raw.answers,
+      figure: raw.figure || null,
+      variations: request.variations || [],
       solution: raw.solution,
       marking: raw.marking,
       skill: raw.skill,
@@ -5839,7 +5878,9 @@ async function runGeneration(requests, onProgress) {
   try {
     for (let i = 0; i < requests.length; i++) {
       const request = requests[i];
-      const examples = request.template ? [request.template, ...pickExamples(request, rows, used).slice(0, 2)] : pickExamples(request, rows, used);
+      const examples = request.template
+        ? [request.template, ...(request.others || []), ...pickExamples(request, rows, used)].filter((row, index, list) => list.indexOf(row) === index).slice(0, 3)
+        : pickExamples(request, rows, used);
       examples.forEach((ex) => used.add(ex.source_id));
       let result;
       try {
@@ -5873,6 +5914,307 @@ async function reviewGenerated(row, decision, reasons, note) {
   }), 'feedback');
 }
 
+/* ---------- 第三阶段：带图的题、按样板出题 ---------- */
+// AI 不画图，只给出函数和坐标范围，图由本地画成 SVG，保证和题目数据一致。
+const GEN_FIGURE_SCHEMA = {
+  type: 'OBJECT',
+  nullable: true,
+  required: ['x_min', 'x_max', 'y_min', 'y_max', 'functions'],
+  properties: {
+    x_min: { type: 'NUMBER' }, x_max: { type: 'NUMBER' }, y_min: { type: 'NUMBER' }, y_max: { type: 'NUMBER' },
+    x_label: { type: 'STRING' }, y_label: { type: 'STRING' },
+    functions: { type: 'ARRAY', items: { type: 'OBJECT', required: ['expr'], properties: {
+      expr: { type: 'STRING' }, from: { type: 'NUMBER', nullable: true }, to: { type: 'NUMBER', nullable: true },
+      label: { type: 'STRING' }, dashed: { type: 'BOOLEAN' },
+    } } },
+    points: { type: 'ARRAY', items: { type: 'OBJECT', required: ['x', 'y'], properties: {
+      x: { type: 'NUMBER' }, y: { type: 'NUMBER' }, label: { type: 'STRING' }, open: { type: 'BOOLEAN' },
+    } } },
+    vertical: { type: 'ARRAY', items: { type: 'NUMBER' } },
+    horizontal: { type: 'ARRAY', items: { type: 'NUMBER' } },
+  },
+};
+QUESTION_SCHEMA.properties.figure = GEN_FIGURE_SCHEMA;
+
+const FIGURE_SIZE = { width: 520, height: 360, pad: 34 };
+const compiledExpressions = new Map();
+
+function figureFunction(expr) {
+  if (!window.math) throw new Error('画图组件 math.js 没有加载');
+  if (!compiledExpressions.has(expr)) compiledExpressions.set(expr, window.math.compile(expr));
+  const compiled = compiledExpressions.get(expr);
+  return (x) => {
+    const value = compiled.evaluate({ x, e: Math.E, pi: Math.PI });
+    return typeof value === 'number' ? value : NaN;
+  };
+}
+
+// 图能不能画：坐标范围合理，每个函数能求值，并且在范围内有可见的部分。
+function checkFigure(figure) {
+  if (!figure) return [];
+  const problems = [];
+  if (!(figure.x_max > figure.x_min) || !(figure.y_max > figure.y_min)) return ['坐标范围不对'];
+  (figure.functions || []).forEach((item) => {
+    try {
+      const f = figureFunction(item.expr);
+      const from = item.from ?? figure.x_min;
+      const to = item.to ?? figure.x_max;
+      let visible = 0;
+      for (let i = 0; i <= 50; i++) {
+        const y = f(from + (to - from) * i / 50);
+        if (Number.isFinite(y) && y >= figure.y_min && y <= figure.y_max) visible += 1;
+      }
+      if (!visible) problems.push(`函数 ${item.expr} 在坐标范围内看不到`);
+    } catch (e) {
+      problems.push(`函数 ${item.expr} 无法计算`);
+    }
+  });
+  return problems;
+}
+
+function svgNode(tag, attributes, text) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// 刻度取 1、2、5 乘 10 的幂，大约 6–10 格。
+function niceStep(span) {
+  const raw = span / 8;
+  const power = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map((m) => m * power).find((step) => step >= raw);
+}
+
+function figureSvg(figure) {
+  const { width, height, pad } = FIGURE_SIZE;
+  const sx = (x) => pad + (x - figure.x_min) / (figure.x_max - figure.x_min) * (width - 2 * pad);
+  const sy = (y) => height - pad - (y - figure.y_min) / (figure.y_max - figure.y_min) * (height - 2 * pad);
+  const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, class: 'gen-figure', role: 'img', 'aria-label': '题目图形' });
+  const ink = '#111';
+  const axisX = Math.min(Math.max(0, figure.y_min), figure.y_max);
+  const axisY = Math.min(Math.max(0, figure.x_min), figure.x_max);
+  svg.append(svgNode('line', { x1: pad, y1: sy(axisX), x2: width - pad + 8, y2: sy(axisX), stroke: ink, 'stroke-width': 1.2 }));
+  svg.append(svgNode('line', { x1: sx(axisY), y1: height - pad, x2: sx(axisY), y2: pad - 8, stroke: ink, 'stroke-width': 1.2 }));
+  svg.append(svgNode('text', { x: width - pad + 12, y: sy(axisX) + 4, 'font-size': 13, 'font-style': 'italic' }, figure.x_label || 'x'));
+  svg.append(svgNode('text', { x: sx(axisY) + 4, y: pad - 12, 'font-size': 13, 'font-style': 'italic' }, figure.y_label || 'y'));
+  const xs = niceStep(figure.x_max - figure.x_min);
+  for (let x = Math.ceil(figure.x_min / xs) * xs; x <= figure.x_max + 1e-9; x += xs) {
+    if (Math.abs(x) < 1e-9) continue;
+    svg.append(svgNode('line', { x1: sx(x), y1: sy(axisX) - 3, x2: sx(x), y2: sy(axisX) + 3, stroke: ink }));
+    svg.append(svgNode('text', { x: sx(x), y: sy(axisX) + 15, 'font-size': 11, 'text-anchor': 'middle' }, Number(x.toFixed(6))));
+  }
+  const ys = niceStep(figure.y_max - figure.y_min);
+  for (let y = Math.ceil(figure.y_min / ys) * ys; y <= figure.y_max + 1e-9; y += ys) {
+    if (Math.abs(y) < 1e-9) continue;
+    svg.append(svgNode('line', { x1: sx(axisY) - 3, y1: sy(y), x2: sx(axisY) + 3, y2: sy(y), stroke: ink }));
+    svg.append(svgNode('text', { x: sx(axisY) - 6, y: sy(y) + 4, 'font-size': 11, 'text-anchor': 'end' }, Number(y.toFixed(6))));
+  }
+  svg.append(svgNode('text', { x: sx(axisY) - 6, y: sy(axisX) + 15, 'font-size': 11, 'text-anchor': 'end', 'font-style': 'italic' }, 'O'));
+  (figure.vertical || []).forEach((x) => svg.append(svgNode('line', { x1: sx(x), y1: pad, x2: sx(x), y2: height - pad, stroke: ink, 'stroke-dasharray': '5 4' })));
+  (figure.horizontal || []).forEach((y) => svg.append(svgNode('line', { x1: pad, y1: sy(y), x2: width - pad, y2: sy(y), stroke: ink, 'stroke-dasharray': '5 4' })));
+  (figure.functions || []).forEach((item) => {
+    let f;
+    try { f = figureFunction(item.expr); } catch (e) { return; }
+    const from = Math.max(item.from ?? figure.x_min, figure.x_min);
+    const to = Math.min(item.to ?? figure.x_max, figure.x_max);
+    const steps = 600;
+    let path = '';
+    let previous = null;
+    let last = null;
+    for (let i = 0; i <= steps; i++) {
+      const x = from + (to - from) * i / steps;
+      const y = f(x);
+      const inside = Number.isFinite(y) && y >= figure.y_min - (figure.y_max - figure.y_min) && y <= figure.y_max + (figure.y_max - figure.y_min);
+      // 跳过断点（渐近线两侧）：值不存在或相邻两点跳得太远就断开。
+      const jump = previous !== null && Math.abs(y - previous) > (figure.y_max - figure.y_min) * 0.8;
+      if (inside && !jump && path && last !== null) path += ` L ${sx(x).toFixed(1)} ${sy(y).toFixed(1)}`;
+      else if (inside) path += ` M ${sx(x).toFixed(1)} ${sy(y).toFixed(1)}`;
+      last = inside ? y : null;
+      previous = Number.isFinite(y) ? y : null;
+    }
+    const clip = `clip-${Math.random().toString(36).slice(2, 8)}`;
+    const def = svgNode('clipPath', { id: clip });
+    def.append(svgNode('rect', { x: pad, y: pad, width: width - 2 * pad, height: height - 2 * pad }));
+    svg.append(def);
+    svg.append(svgNode('path', { d: path.trim(), fill: 'none', stroke: ink, 'stroke-width': 1.8, 'clip-path': `url(#${clip})`, ...(item.dashed ? { 'stroke-dasharray': '6 4' } : {}) }));
+    if (item.label) {
+      const lx = from + (to - from) * 0.85;
+      const ly = f(lx);
+      if (Number.isFinite(ly) && ly > figure.y_min && ly < figure.y_max) svg.append(svgNode('text', { x: sx(lx) + 6, y: sy(ly) - 6, 'font-size': 12, 'font-style': 'italic' }, item.label));
+    }
+  });
+  (figure.points || []).forEach((point) => {
+    svg.append(svgNode('circle', { cx: sx(point.x), cy: sy(point.y), r: 3.5, fill: point.open ? '#fff' : ink, stroke: ink, 'stroke-width': 1.4 }));
+    if (point.label) svg.append(svgNode('text', { x: sx(point.x) + 6, y: sy(point.y) - 6, 'font-size': 12 }, point.label));
+  });
+  return svg;
+}
+
+function figureText(figure) {
+  if (!figure) return '';
+  const lines = [`[Graph: x from ${figure.x_min} to ${figure.x_max}, y from ${figure.y_min} to ${figure.y_max}]`];
+  (figure.functions || []).forEach((item) => lines.push(`curve${item.label ? ` ${item.label}` : ''}: y = ${item.expr}${item.from != null || item.to != null ? ` for ${item.from ?? figure.x_min} <= x <= ${item.to ?? figure.x_max}` : ''}${item.dashed ? ' (dashed)' : ''}`));
+  (figure.points || []).forEach((point) => lines.push(`point${point.label ? ` ${point.label}` : ''} (${point.x}, ${point.y})${point.open ? ' open circle' : ''}`));
+  (figure.vertical || []).forEach((x) => lines.push(`dashed line x = ${x}`));
+  (figure.horizontal || []).forEach((y) => lines.push(`dashed line y = ${y}`));
+  return lines.join('\n');
+}
+
+/* 按样板出题：老师挑 1–3 道题当样板，勾选变化方式 */
+const VARIATIONS = {
+  context: ['换情境', 'Use a completely different context or situation, testing the same skill.'],
+  harder: ['加难一步', 'Make it harder by adding one more reasoning step than the template.'],
+  easier: ['降低难度', 'Make it easier: remove one step or give an intermediate result.'],
+  combine: ['和另一个知识点组合', ''],
+  figure: ['带图', 'The question must use a graph: provide "figure" and refer to "the graph below" in the stem.'],
+};
+const variantState = { templates: [] };
+const DIFF_LEVELS = ['easy', 'medium', 'hard'];
+
+function variantRequests() {
+  const chosen = [...document.querySelectorAll('#vOptions input:checked')].map((box) => box.value);
+  const count = Math.min(5, Math.max(1, Number($('vCount').value) || 1));
+  const type = $('vType').value;
+  const requests = [];
+  for (let i = 0; i < count; i++) {
+    const template = variantState.templates[i % variantState.templates.length];
+    const level = DIFF_LEVELS.indexOf(template.difficulty || 'medium') + (chosen.includes('harder') ? 1 : 0) - (chosen.includes('easier') ? 1 : 0);
+    const questionType = type === 'same' ? template.question_type : type;
+    const marks = questionType === 'multiple choice' ? 1 : (Number($('vMarks').value) || (template.question_type === 'multiple choice' ? 3 : template.marks));
+    const notes = chosen.filter((key) => key !== 'combine').map((key) => VARIATIONS[key][1]);
+    const second = $('vCombineTopic').value;
+    if (chosen.includes('combine') && second) notes.push(`Combine the skill of the template with the topic "${second}" in one question.`);
+    if (variantState.templates.length > 1) notes.push('Several templates are given: blend what they test, do not copy any single one.');
+    requests.push({
+      subject: template.subject, topic: template.topic, question_type: questionType, marks,
+      difficulty: DIFF_LEVELS[Math.min(2, Math.max(0, level))], template, others: variantState.templates.filter((row) => row !== template),
+      variations: notes, wantFigure: chosen.includes('figure'),
+    });
+  }
+  return requests;
+}
+
+function renderVariantPanel() {
+  const host = $('vTemplates');
+  host.textContent = '';
+  variantState.templates.forEach((row, index) => {
+    const chip = el('span', 'tag');
+    chip.append(document.createTextNode(`${row.source.label} · ${row.topic} `));
+    const remove = el('button', 'chip-x', '×');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', '移除样板');
+    remove.addEventListener('click', () => { variantState.templates.splice(index, 1); renderVariantPanel(); });
+    chip.append(remove);
+    host.append(chip);
+  });
+  $('vEmpty').hidden = variantState.templates.length > 0;
+  $('vRun').disabled = !variantState.templates.length || aiState.running;
+  const subject = variantState.templates[0] ? variantState.templates[0].subject : $('pbSubject').value;
+  const select = $('vCombineTopic');
+  const previous = select.value;
+  select.textContent = '';
+  select.append(new Option('选一个知识点', ''));
+  topicsForSubject(state.taxonomy || DEFAULT_TAXONOMY, subject).forEach((topic) => select.append(new Option(topic, topic)));
+  select.value = previous;
+}
+
+function addTemplate(row) {
+  if (variantState.templates.includes(row)) return;
+  if (variantState.templates.length >= 3) variantState.templates.shift();
+  if (variantState.templates.length && variantState.templates[0].subject !== row.subject) variantState.templates = [];
+  variantState.templates.push(row);
+  $('variantPanel').open = true;
+  renderVariantPanel();
+  $('variantPanel').scrollIntoView({ block: 'nearest' });
+}
+
+function renderTemplatePicker() {
+  const host = $('vPicker');
+  host.textContent = '';
+  const topic = $('vPickTopic').value;
+  const rows = paperState.rows.filter((row) => row.subject === $('pbSubject').value && usableInPaper(row) && (!topic || row.topic === topic)).slice(0, 24);
+  rows.forEach((row) => {
+    const item = el('div', 'pick');
+    const button = el('button', '', '选为样板');
+    button.type = 'button';
+    button.addEventListener('click', () => addTemplate(row));
+    item.append(el('div', 'hint', `${row.source.label} · ${row.marks} 分 · ${DIFFICULTY_LABELS[row.difficulty] || '未标难度'}`));
+    if (row.snapshot) {
+      const image = el('img', 'pick-img');
+      image.src = row.snapshot;
+      image.alt = row.source.label;
+      item.append(image);
+    } else {
+      item.append(generatedBody(row, true));
+    }
+    item.append(button);
+    host.append(item);
+  });
+  renderMath(host);
+  if (!rows.length) host.append(el('p', 'hint', '这个条件下题库里没有题。'));
+}
+
+async function runVariants() {
+  if (!variantState.templates.length) return;
+  if (!aiKey()) {
+    showAlert($('paperWarn'), '还没有 Gemini Key', '在左侧“AI 服务”选 Google Gemini 并填写 Key。');
+    return;
+  }
+  if ($('vOptions').querySelector('input[value="combine"]').checked && !$('vCombineTopic').value) {
+    showAlert($('paperWarn'), '请选要组合的知识点', '勾了“和另一个知识点组合”，需要选一个知识点。');
+    return;
+  }
+  const requests = variantRequests();
+  const calls = `${requests.length * 2}–${requests.length * 3}`;
+  if (!window.confirm(`将按样板出 ${requests.length} 道题，约 ${calls} 次调用。\n免费层每天的次数有限（gemini-3.6-flash 实测约 20 次）。\n付费层预计约 $${(requests.length * AI_COST_PER_QUESTION).toFixed(2)}（粗估）。\n继续吗？`)) return;
+  setPaperBusy(true);
+  $('vRun').disabled = true;
+  try {
+    const { made, failed, stopped } = await runGeneration(requests, (index, total, step) => {
+      $('paperProgress').textContent = `按样板出题：第 ${index + 1} / ${total} 题，${step}`;
+    });
+    paperState.picked = [...made, ...paperState.picked.filter((row) => !made.includes(row))];
+    paperState.options = paperState.options || paperOptions();
+    paperState.warnings = [];
+    if (made.length) paperState.warnings.push(`按样板出了 ${made.length} 道题，排在最前面，请审核。`);
+    if (stopped) paperState.warnings.push(stopped);
+    if (failed.length) paperState.warnings.push(`${failed.length} 道题没通过本地检查，已放弃：${failed.join('；')}。`);
+  } catch (e) {
+    paperState.warnings = [`按样板出题失败：${e.message || e}`];
+  } finally {
+    setPaperBusy(false);
+    paperState.rows = await bankRows();
+    renderVariantPanel();
+    renderPaperView();
+  }
+}
+
+function initVariantUi() {
+  Object.entries(VARIATIONS).forEach(([key, [label]]) => {
+    const wrap = el('label', 'check');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.value = key;
+    box.checked = key === 'context';
+    wrap.append(box, document.createTextNode(` ${label}`));
+    $('vOptions').append(wrap);
+  });
+  $('vOptions').append($('vCombineTopic'));
+  [['same', '和样板相同'], ...PAPER_TYPES].forEach(([value, label]) => $('vType').append(new Option(label, value)));
+  $('vRun').addEventListener('click', runVariants);
+  $('vPickTopic').addEventListener('change', renderTemplatePicker);
+  $('vShowPicker').addEventListener('click', () => {
+    const select = $('vPickTopic');
+    select.textContent = '';
+    select.append(new Option('全部知识点', ''));
+    topicsForSubject(state.taxonomy || DEFAULT_TAXONOMY, $('pbSubject').value).forEach((topic) => select.append(new Option(topic, topic)));
+    $('vPickerWrap').hidden = false;
+    renderTemplatePicker();
+  });
+  renderVariantPanel();
+}
+
 /* ---------- AI 出题的页面部分 ---------- */
 const GEN_STATUS = { pending: '待审核', approved: '已通过', rejected: '已退回' };
 const AI_COST_PER_QUESTION = 0.05; // 粗估：出题、独立重做、必要时比对，共 2–3 次调用，按 gemini-3.6-flash 现价。以实际用量为准。
@@ -5889,6 +6231,9 @@ function richText(tag, className, text) {
 function generatedBody(row, forPrint) {
   const body = el('div', 'gen-body');
   body.append(richText('div', 'qtext', row.stem));
+  if (row.figure) {
+    try { body.append(figureSvg(row.figure)); } catch (e) { body.append(el('div', 'hint', `图形无法显示：${e.message}`)); }
+  }
   if (row.options.length) {
     const list = el('ol', 'gen-options');
     row.options.forEach((option) => list.append(richText('li', 'qtext', option)));
@@ -7889,6 +8234,7 @@ function init() {
   $('pPrint').addEventListener('click', printPaper);
   $('pExport').addEventListener('click', exportPaperList);
   initAiUi();
+  initVariantUi();
   $('bankCsv').addEventListener('click', exportBankCsv);
   $('bankClear').addEventListener('click', clearBank);
   renderBank().catch((e) => console.warn('题库读取失败', e));
