@@ -180,6 +180,29 @@
 
   .qshot { display: block; width: 100%; height: auto; margin-top: 8px; background: #fff; }
   .bank { margin-bottom: 12px; padding: 12px 16px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tab { border-radius: 999px; }
+  .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .paper-form { padding: 14px 16px; margin-bottom: 12px; display: grid; gap: 12px; }
+  .paper-form fieldset { border: 0; padding: 0; margin: 0; }
+  .paper-form legend { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .paper-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 12px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .check.muted { color: var(--muted); }
+  .paper-form input[type=number] { width: 70px; flex: 0 0 70px; }
+  .paper-summary { font-weight: 600; margin: 0 0 10px; }
+  .paper-item .row { margin-top: 8px; }
+  #printSheet { display: none; }
+  @media print {
+    body > *:not(#printSheet) { display: none !important; }
+    #printSheet { display: block; color: #000; }
+    #printSheet h1 { font-size: 20px; margin: 0 0 4px; }
+    .print-name { margin: 8px 0 16px; }
+    .print-q { break-inside: avoid; margin-bottom: 18px; }
+    .print-label { font-weight: 700; margin-bottom: 4px; }
+    .print-q img { width: 100%; }
+  }
   .bank-table th { white-space: nowrap; }
   .bank summary { font-weight: 600; cursor: pointer; }
   .bank-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
@@ -278,6 +301,66 @@
   </aside>
 
   <section class="work" aria-live="polite">
+    <div class="tabs" role="tablist">
+      <button id="tabAnalysis" class="tab active" type="button" role="tab">分析试卷</button>
+      <button id="tabPaper" class="tab" type="button" role="tab">组卷</button>
+    </div>
+
+    <div id="paperView" hidden>
+      <div id="paperEmpty" class="panel empty">
+        <strong>题库是空的</strong>
+        先在“分析试卷”里分析几份试卷，题目会自动存进题库，再回来组卷。
+      </div>
+      <div id="paperForm" class="panel paper-form" hidden>
+        <div class="paper-grid">
+          <label class="field"><span>科目</span><select id="pbSubject"></select></label>
+          <label class="field"><span>时长</span>
+            <div class="row">
+              <select id="pMinutes"></select>
+              <input id="pMinutesCustom" type="number" min="5" max="300" step="5" placeholder="分钟" hidden>
+            </div>
+          </label>
+          <label class="field"><span>试卷标题（打印用）</span><input id="pTitle" type="text" spellcheck="false" placeholder="留空则用科目名"></label>
+        </div>
+        <fieldset class="field"><legend>知识点</legend>
+          <div class="row" style="margin-bottom:6px"><button id="pAll" type="button">全选</button><button id="pNone" type="button">清空</button></div>
+          <div id="pTopics" class="checks"></div>
+        </fieldset>
+        <div class="paper-grid">
+          <fieldset class="field"><legend>难度比例（易 : 中 : 难）</legend>
+            <div class="row">
+              <input id="pEasy" type="number" min="0" max="10" value="3" aria-label="简单">
+              <input id="pMedium" type="number" min="0" max="10" value="5" aria-label="中等">
+              <input id="pHard" type="number" min="0" max="10" value="2" aria-label="困难">
+            </div>
+            <label class="check"><input id="pUnlabelled" type="checkbox" checked> 未标难度的题按中等算</label>
+            <span class="hint" id="pLabelled"></span>
+          </fieldset>
+          <fieldset class="field"><legend>题型</legend>
+            <div id="pTypes" class="checks"></div>
+          </fieldset>
+          <fieldset class="field"><legend>出题方式</legend>
+            <label class="check"><input type="radio" name="pMode" value="bank" checked> 只从题库选（不用 AI）</label>
+            <label class="check muted"><input type="radio" name="pMode" value="fill" disabled> 题库优先，不够由 AI 补（下一阶段）</label>
+            <label class="check muted"><input type="radio" name="pMode" value="new" disabled> 全部由 AI 仿照题库新出（下一阶段）</label>
+          </fieldset>
+        </div>
+        <div class="row">
+          <button id="pBuild" class="primary" type="button">生成试卷</button>
+          <button id="pAgain" type="button">换一批</button>
+        </div>
+      </div>
+      <div id="paperWarn" class="alert warn" hidden></div>
+      <p id="paperSummary" class="paper-summary"></p>
+      <div id="paperTools" class="row" hidden style="margin-bottom:10px">
+        <button id="pPrint" type="button">打印 / 存为 PDF</button>
+        <button id="pExport" type="button">导出题目清单 CSV</button>
+        <span class="hint">裁图里仍是原卷题号，打印时以左上角的新题号为准。</span>
+      </div>
+      <div id="paperList" class="cards"></div>
+    </div>
+
+    <div id="analysisView">
     <div id="error" class="alert" hidden></div>
     <div id="warning" class="alert warn" hidden></div>
 
@@ -365,8 +448,10 @@
       </div>
       <div id="cards" class="cards"></div>
     </div>
+    </div>
   </section>
 </main>
+<div id="printSheet" aria-hidden="true"></div>
 
 <dialog id="cropDialog" aria-labelledby="cropTitle">
   <div class="crop-head">
@@ -4400,10 +4485,14 @@ function detectPaper(text, fileName, taxonomy) {
     : (vcaa || /Units?\s*(?:3|4|3\s*(?:and|&|\/)\s*4)\b/i.test(head) ? 'Unit 3/4' : 'Unknown');
   const owner = /copyright\s*[@©]?(?:️)?\s*([A-Z][\w&. ]+?)(?:\s+Pty|\s+Ltd|$|\n)/im.exec(text);
   const year = /\b(20\d{2})\b/.exec(head) || /\b(20\d{2})\b/.exec(fileName) || /\b(20\d{2})\s+VCE\b/.exec(text);
+  // NHT 卷封面写着 (NHT)，在 5、6 月考；正式考试在 10、11 月。判断不出来就不算正式考试。
+  const nht = /\(NHT\)|\bN\s?H\s?T\b/.test(text.slice(0, 4000)) || /\b(?:May|June)\s+20\d{2}/.test(head);
+  const main = !nht && /\b(?:October|November)\b/.test(head);
   return {
     subject,
     unit,
-    paper_type: sac ? 'SAC' : (exam ? `${vcaa ? 'VCAA ' : ''}Exam ${exam[1]}` : (vcaa ? 'VCAA Exam' : '未识别')),
+    paper_type: sac ? 'SAC' : `${exam ? `${vcaa ? 'VCAA ' : ''}Exam ${exam[1]}` : (vcaa ? 'VCAA Exam' : '未识别')}${vcaa && nht ? ' (NHT)' : ''}`,
+    sitting: vcaa ? (nht ? 'NHT' : (main ? 'main' : null)) : null,
     publisher: vcaa ? 'VCAA' : (owner ? owner[1].trim() : 'Unknown'),
     paper_title: fileName.replace(/\.\w+$/, ''),
     year: year ? Number(year[1]) : null,
@@ -5005,6 +5094,278 @@ function classifyByRules(q, paper, taxonomy) {
   };
 }
 
+/* ---------- 难度：VCAA 考试报告的得分率 ---------- */
+// 每题得分率（平均得分 ÷ 满分；选择题是选对的比例），来自 VCAA 公开的 external assessment report。
+// 只有正式考试有统计，NHT 报告没有，所以 NHT 试卷不用这张表。
+// 键：年份 + 科目代码 + 试卷号；题号：A/B 区加题号，没有分区的直接是题号。
+const VCAA_FACILITY = {"2023GM1":{"1":{"f":0.9,"m":1},"2":{"f":0.88,"m":1},"3":{"f":0.89,"m":1},"4":{"f":0.82,"m":1},"5":{"f":0.84,"m":1},"6":{"f":0.54,"m":1},"7":{"f":0.6,"m":1},"8":{"f":0.43,"m":1},"9":{"f":0.59,"m":1},"10":{"f":0.59,"m":1},"11":{"f":0.6,"m":1},"12":{"f":0.76,"m":1},"13":{"f":0.68,"m":1},"14":{"f":0.37,"m":1},"15":{"f":0.66,"m":1},"16":{"f":0.43,"m":1},"17":{"f":0.43,"m":1},"18":{"f":0.6,"m":1},"19":{"f":0.62,"m":1},"20":{"f":0.82,"m":1},"21":{"f":0.48,"m":1},"22":{"f":0.39,"m":1},"23":{"f":0.37,"m":1},"24":{"f":0.27,"m":1},"25":{"f":0.89,"m":1},"26":{"f":0.9,"m":1},"27":{"f":0.39,"m":1},"28":{"f":0.69,"m":1},"29":{"f":0.62,"m":1},"30":{"f":0.39,"m":1},"31":{"f":0.74,"m":1},"32":{"f":0.18,"m":1},"33":{"f":0.56,"m":1},"34":{"f":0.77,"m":1},"35":{"f":0.74,"m":1},"36":{"f":0.75,"m":1},"37":{"f":0.66,"m":1},"38":{"f":0.6,"m":1},"39":{"f":0.62,"m":1},"40":{"f":0.4,"m":1}},"2023GM2":{"1":{"f":0.511,"m":9},"2":{"f":0.8,"m":5},"3":{"f":0.55,"m":6},"4":{"f":0.425,"m":4},"5":{"f":0.533,"m":3},"6":{"f":0.525,"m":4},"7":{"f":0.32,"m":5},"8":{"f":0.4,"m":3},"9":{"f":0.625,"m":4},"10":{"f":0.567,"m":3},"11":{"f":0.35,"m":2},"12":{"f":0.8,"m":4},"13":{"f":0.4,"m":3},"14":{"f":0.42,"m":5}},"2023MM1":{"1":{"f":0.725,"m":4},"2":{"f":0.667,"m":3},"3":{"f":0.7,"m":4},"4":{"f":0.55,"m":2},"5":{"f":0.625,"m":4},"6":{"f":0.35,"m":4},"7":{"f":0.5,"m":7},"8":{"f":0.317,"m":6},"9":{"f":0.45,"m":6}},"2023MM2":{"A1":{"f":0.77,"m":1},"A2":{"f":0.53,"m":1},"A3":{"f":0.47,"m":1},"A4":{"f":0.55,"m":1},"A5":{"f":0.62,"m":1},"A6":{"f":0.49,"m":1},"A7":{"f":0.6,"m":1},"A8":{"f":0.49,"m":1},"A9":{"f":0.42,"m":1},"A10":{"f":0.6,"m":1},"A11":{"f":0.22,"m":1},"A12":{"f":0.29,"m":1},"A13":{"f":0.52,"m":1},"A14":{"f":0.29,"m":1},"A15":{"f":0.65,"m":1},"A16":{"f":0.69,"m":1},"A17":{"f":0.28,"m":1},"A18":{"f":0.29,"m":1},"A19":{"f":0.32,"m":1},"A20":{"f":0.3,"m":1},"B1":{"f":0.582,"m":11},"B2":{"f":0.445,"m":11},"B3":{"f":0.442,"m":12},"B4":{"f":0.487,"m":15},"B5":{"f":0.345,"m":11}},"2023SM1":{"1":{"f":0.7,"m":4},"2":{"f":0.5,"m":3},"3":{"f":0.467,"m":3},"4":{"f":0.6,"m":3},"5":{"f":0.667,"m":3},"6":{"f":0.65,"m":4},"7":{"f":0.55,"m":4},"8":{"f":0.525,"m":4},"9":{"f":0.733,"m":6},"10":{"f":0.533,"m":6}},"2023SM2":{"A1":{"f":0.85,"m":1},"A2":{"f":0.59,"m":1},"A3":{"f":0.72,"m":1},"A4":{"f":0.62,"m":1},"A5":{"f":0.34,"m":1},"A6":{"f":0.69,"m":1},"A7":{"f":0.68,"m":1},"A8":{"f":0.37,"m":1},"A9":{"f":0.65,"m":1},"A10":{"f":0.33,"m":1},"A11":{"f":0.46,"m":1},"A12":{"f":0.54,"m":1},"A13":{"f":0.45,"m":1},"A14":{"f":0.48,"m":1},"A15":{"f":0.18,"m":1},"A16":{"f":0.32,"m":1},"A17":{"f":0.73,"m":1},"A18":{"f":0.74,"m":1},"A19":{"f":0.67,"m":1},"A20":{"f":0.63,"m":1},"B1":{"f":0.73,"m":10},"B2":{"f":0.42,"m":10},"B3":{"f":0.64,"m":10},"B4":{"f":0.58,"m":10},"B5":{"f":0.545,"m":11},"B6":{"f":0.689,"m":9}},"2024GM1":{"1":{"f":0.78,"m":1},"2":{"f":0.79,"m":1},"3":{"f":0.71,"m":1},"4":{"f":0.68,"m":1},"5":{"f":0.8,"m":1},"6":{"f":0.53,"m":1},"7":{"f":0.82,"m":1},"8":{"f":0.73,"m":1},"9":{"f":0.52,"m":1},"10":{"f":0.73,"m":1},"11":{"f":0.59,"m":1},"12":{"f":0.48,"m":1},"13":{"f":0.72,"m":1},"14":{"f":0.68,"m":1},"15":{"f":0.7,"m":1},"16":{"f":0.58,"m":1},"17":{"f":0.36,"m":1},"18":{"f":0.74,"m":1},"19":{"f":0.72,"m":1},"20":{"f":0.48,"m":1},"21":{"f":0.56,"m":1},"22":{"f":0.7,"m":1},"23":{"f":0.54,"m":1},"24":{"f":0.46,"m":1},"25":{"f":0.79,"m":1},"26":{"f":0.76,"m":1},"27":{"f":0.5,"m":1},"28":{"f":0.84,"m":1},"29":{"f":0.49,"m":1},"30":{"f":0.78,"m":1},"31":{"f":0.53,"m":1},"32":{"f":0.33,"m":1},"33":{"f":0.75,"m":1},"34":{"f":0.85,"m":1},"35":{"f":0.52,"m":1},"36":{"f":0.83,"m":1},"37":{"f":0.4,"m":1},"38":{"f":0.18,"m":1},"39":{"f":0.19,"m":1},"40":{"f":0.32,"m":1}},"2024GM2":{"1":{"f":0.738,"m":8},"2":{"f":0.675,"m":4},"3":{"f":0.58,"m":10},"4":{"f":0.45,"m":2},"5":{"f":0.65,"m":4},"6":{"f":0.4,"m":2},"7":{"f":0.5,"m":4},"8":{"f":0.3,"m":2},"9":{"f":0.8,"m":3},"10":{"f":0.55,"m":2},"11":{"f":0.433,"m":3},"12":{"f":0.25,"m":4},"13":{"f":0.85,"m":4},"14":{"f":0.433,"m":3},"15":{"f":0.32,"m":5}},"2024MM1":{"1":{"f":0.667,"m":3},"2":{"f":0.567,"m":3},"3":{"f":0.58,"m":5},"4":{"f":0.533,"m":3},"5":{"f":0.517,"m":6},"6":{"f":0.375,"m":4},"7":{"f":0.422,"m":9},"8":{"f":0.343,"m":7}},"2024MM2":{"A1":{"f":0.74,"m":1},"A2":{"f":0.81,"m":1},"A3":{"f":0.67,"m":1},"A4":{"f":0.7,"m":1},"A5":{"f":0.52,"m":1},"A6":{"f":0.5,"m":1},"A7":{"f":0.68,"m":1},"A8":{"f":0.65,"m":1},"A9":{"f":0.66,"m":1},"A10":{"f":0.38,"m":1},"A11":{"f":0.4,"m":1},"A12":{"f":0.47,"m":1},"A13":{"f":0.45,"m":1},"A14":{"f":0.53,"m":1},"A15":{"f":0.53,"m":1},"A16":{"f":0.36,"m":1},"A17":{"f":0.27,"m":1},"A18":{"f":0.58,"m":1},"A19":{"f":0.57,"m":1},"A20":{"f":0.41,"m":1},"B1":{"f":0.533,"m":12},"B2":{"f":0.609,"m":11},"B3":{"f":0.527,"m":11},"B4":{"f":0.48,"m":15},"B5":{"f":0.445,"m":11}},"2024SM1":{"1":{"f":0.625,"m":4},"2":{"f":0.833,"m":3},"3":{"f":0.55,"m":6},"4":{"f":0.725,"m":4},"5":{"f":0.7,"m":3},"6":{"f":0.54,"m":5},"7":{"f":0.575,"m":4},"8":{"f":0.6,"m":4},"9":{"f":0.475,"m":4},"10":{"f":0.267,"m":3}},"2024SM2":{"A1":{"f":0.72,"m":1},"A2":{"f":0.48,"m":1},"A3":{"f":0.7,"m":1},"A4":{"f":0.27,"m":1},"A5":{"f":0.7,"m":1},"A6":{"f":0.77,"m":1},"A7":{"f":0.72,"m":1},"A8":{"f":0.6,"m":1},"A9":{"f":0.45,"m":1},"A10":{"f":0.74,"m":1},"A11":{"f":0.58,"m":1},"A12":{"f":0.5,"m":1},"A13":{"f":0.81,"m":1},"A14":{"f":0.36,"m":1},"A15":{"f":0.36,"m":1},"A16":{"f":0.43,"m":1},"A17":{"f":0.58,"m":1},"A18":{"f":0.68,"m":1},"A19":{"f":0.68,"m":1},"A20":{"f":0.48,"m":1},"B1":{"f":0.56,"m":10},"B2":{"f":0.69,"m":10},"B3":{"f":0.44,"m":10},"B4":{"f":0.509,"m":11},"B5":{"f":0.66,"m":10},"B6":{"f":0.667,"m":9}},"2025GM1":{"1":{"f":0.75,"m":1},"2":{"f":0.76,"m":1},"3":{"f":0.82,"m":1},"4":{"f":0.52,"m":1},"5":{"f":0.81,"m":1},"6":{"f":0.79,"m":1},"7":{"f":0.86,"m":1},"8":{"f":0.79,"m":1},"9":{"f":0.66,"m":1},"10":{"f":0.63,"m":1},"11":{"f":0.81,"m":1},"12":{"f":0.61,"m":1},"13":{"f":0.76,"m":1},"14":{"f":0.85,"m":1},"15":{"f":0.81,"m":1},"16":{"f":0.5,"m":1},"17":{"f":0.53,"m":1},"18":{"f":0.52,"m":1},"19":{"f":0.49,"m":1},"20":{"f":0.55,"m":1},"21":{"f":0.69,"m":1},"22":{"f":0.68,"m":1},"23":{"f":0.41,"m":1},"24":{"f":0.52,"m":1},"25":{"f":0.83,"m":1},"26":{"f":0.84,"m":1},"27":{"f":0.76,"m":1},"28":{"f":0.93,"m":1},"29":{"f":0.84,"m":1},"30":{"f":0.73,"m":1},"31":{"f":0.7,"m":1},"32":{"f":0.63,"m":1},"33":{"f":0.76,"m":1},"34":{"f":0.85,"m":1},"35":{"f":0.65,"m":1},"36":{"f":0.77,"m":1},"37":{"f":0.73,"m":1},"38":{"f":0.47,"m":1},"39":{"f":0.71,"m":1},"40":{"f":0.39,"m":1}},"2025GM2":{"1":{"f":0.76,"m":5},"2":{"f":0.85,"m":2},"3":{"f":0.55,"m":2},"4":{"f":0.588,"m":8},"5":{"f":0.5,"m":3},"6":{"f":0.375,"m":4},"7":{"f":0.625,"m":4},"8":{"f":0.667,"m":3},"9":{"f":0.367,"m":3},"10":{"f":0.2,"m":2},"11":{"f":0.7,"m":3},"12":{"f":0.4,"m":2},"13":{"f":0.3,"m":4},"14":{"f":0.367,"m":3},"15":{"f":0.8,"m":4},"16":{"f":0.45,"m":2},"17":{"f":0.35,"m":2},"18":{"f":0.425,"m":4}},"2025MM1":{"1":{"f":0.8,"m":3},"2":{"f":0.6,"m":2},"3":{"f":0.633,"m":6},"4":{"f":0.7,"m":4},"5":{"f":0.625,"m":4},"6":{"f":0.6,"m":3},"7":{"f":0.683,"m":6},"8":{"f":0.44,"m":5},"9":{"f":0.271,"m":7}},"2025MM2":{"A1":{"f":0.91,"m":1},"A2":{"f":0.51,"m":1},"A3":{"f":0.71,"m":1},"A4":{"f":0.55,"m":1},"A5":{"f":0.76,"m":1},"A6":{"f":0.5,"m":1},"A7":{"f":0.72,"m":1},"A8":{"f":0.66,"m":1},"A9":{"f":0.57,"m":1},"A10":{"f":0.57,"m":1},"A11":{"f":0.75,"m":1},"A12":{"f":0.58,"m":1},"A13":{"f":0.45,"m":1},"A14":{"f":0.66,"m":1},"A15":{"f":0.44,"m":1},"A16":{"f":0.18,"m":1},"A17":{"f":0.38,"m":1},"A18":{"f":0.5,"m":1},"A19":{"f":0.14,"m":1},"A20":{"f":0.36,"m":1},"B1":{"f":0.654,"m":13},"B2":{"f":0.579,"m":14},"B3":{"f":0.593,"m":14},"B4":{"f":0.447,"m":19}},"2025SM1":{"1":{"f":0.725,"m":4},"2":{"f":0.733,"m":3},"3":{"f":0.58,"m":5},"4":{"f":0.54,"m":5},"5":{"f":0.525,"m":4},"6":{"f":0.625,"m":4},"7":{"f":0.65,"m":4},"8":{"f":0.66,"m":5},"9":{"f":0.45,"m":6}},"2025SM2":{"A1":{"f":0.93,"m":1},"A2":{"f":0.48,"m":1},"A3":{"f":0.68,"m":1},"A4":{"f":0.72,"m":1},"A5":{"f":0.69,"m":1},"A6":{"f":0.7,"m":1},"A7":{"f":0.79,"m":1},"A8":{"f":0.8,"m":1},"A9":{"f":0.49,"m":1},"A10":{"f":0.69,"m":1},"A11":{"f":0.55,"m":1},"A12":{"f":0.33,"m":1},"A13":{"f":0.55,"m":1},"A14":{"f":0.48,"m":1},"A15":{"f":0.52,"m":1},"A16":{"f":0.67,"m":1},"A17":{"f":0.52,"m":1},"A18":{"f":0.49,"m":1},"A19":{"f":0.59,"m":1},"A20":{"f":0.54,"m":1},"B1":{"f":0.732,"m":10},"B2":{"f":0.738,"m":10},"B3":{"f":0.554,"m":10},"B4":{"f":0.653,"m":10},"B5":{"f":0.593,"m":10},"B6":{"f":0.746,"m":10}}};
+const FACILITY_EASY = 0.65;   // 得分率不低于这个值算简单。
+const FACILITY_HARD = 0.45;   // 低于这个值算困难。
+const SUBJECT_CODES = { 'Mathematical Methods': 'MM', 'Specialist Mathematics': 'SM', 'General Mathematics': 'GM' };
+
+function difficultyFromFacility(facility) {
+  if (facility >= FACILITY_EASY) return 'easy';
+  return facility < FACILITY_HARD ? 'hard' : 'medium';
+}
+
+// 只在确认是正式考试、并且每题分值都和报告对得上时才使用，避免把正式考试的数据套到同年的 NHT 卷上。
+function reportDifficulty(paper, questions) {
+  const code = SUBJECT_CODES[paper.subject];
+  const exam = /Exam (\d)/.exec(paper.paper_type || '');
+  if (!code || !exam || paper.sitting !== 'main' || !paper.year) return null;
+  const table = VCAA_FACILITY[`${paper.year}${code}${exam[1]}`];
+  if (!table) return null;
+  const keyOf = (q) => `${/Section ([AB])$/.exec(q.section || '') ? q.section.slice(-1) : ''}${q.question_number}`;
+  const matched = questions.filter((q) => table[keyOf(q)] && table[keyOf(q)].m === q.marks);
+  if (matched.length < questions.length * 0.9 || Object.keys(table).length !== questions.length) return null;
+  return new Map(matched.map((q) => [q, table[keyOf(q)].f]));
+}
+
+function applyReportDifficulty(paper, questions) {
+  const found = reportDifficulty(paper, questions);
+  if (!found) return 0;
+  found.forEach((facility, q) => {
+    q.difficulty = difficultyFromFacility(facility);
+    q.ai.difficulty = q.difficulty;
+    q.difficulty_source = 'vcaa-report';
+    q.facility = facility;
+  });
+  return found.size;
+}
+
+const difficultyNote = (q) => (q.difficulty_source === 'vcaa-report' ? `考试报告得分率 ${Math.round(q.facility * 100)}%` : '');
+
+/* ---------- 组卷：从题库按条件抽题 ---------- */
+const PAPER_DURATIONS = [30, 45, 60, 70, 80, 90, 120];
+const MINUTES_PER_MARK = 1.5;          // VCAA Methods / Specialist 两份卷子都是 1.5 分钟 1 分，General Exam 2 也是。
+const GENERAL_CHOICE_MINUTES = 2.25;   // General Exam 1：90 分钟 40 道选择题。
+const PAPER_OVERRUN = 1.05;            // 总时长最多超出 5%。
+const PAPER_TYPES = [['multiple choice', '选择题'], ['short answer', '简答题'], ['extended response', '大题']];
+const paperState = { rows: [], picked: [], seed: 1, warnings: [] };
+
+function questionMinutes(row) {
+  if (row.subject === 'General Mathematics' && row.question_type === 'multiple choice') return GENERAL_CHOICE_MINUTES;
+  return (row.marks || 0) * MINUTES_PER_MARK;
+}
+
+// 可复现的随机数：同一个种子抽出同一份卷子，“换一批”就换种子。
+function seededRandom(seed) {
+  let value = seed >>> 0;
+  return () => {
+    value = (value + 0x6D2B79F5) >>> 0;
+    let t = value;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 按条件抽题：先满足时长，再让知识点和难度的比例接近目标。知识点比例按题库里各知识点的分值占比，也就是真题的出题规律。
+function assemblePaper(rows, options, random) {
+  const ratioTotal = options.ratio.easy + options.ratio.medium + options.ratio.hard;
+  const difficultyOf = (row) => row.difficulty || (options.includeUnlabelled ? 'medium' : '');
+  const pool = rows.filter((row) => row.subject === options.subject && options.topics.includes(row.topic) &&
+    options.types.includes(row.question_type) && row.snapshot && row.marks > 0 &&
+    difficultyOf(row) && (ratioTotal === 0 || options.ratio[difficultyOf(row)] > 0));
+  const limit = options.minutes * PAPER_OVERRUN;
+  const topicMinutes = new Map();
+  pool.forEach((row) => topicMinutes.set(row.topic, (topicMinutes.get(row.topic) || 0) + questionMinutes(row)));
+  const poolMinutes = [...topicMinutes.values()].reduce((sum, value) => sum + value, 0);
+  const topicTarget = (topic) => options.minutes * (topicMinutes.get(topic) || 0) / (poolMinutes || 1);
+  const difficultyTarget = (level) => (ratioTotal ? options.minutes * options.ratio[level] / ratioTotal : 0);
+  const usedTopic = new Map();
+  const usedLevel = new Map();
+  const order = pool.map((row) => ({ row, noise: random() }));
+  const picked = [];
+  let used = 0;
+  while (true) {
+    const fits = order.filter(({ row }) => !picked.includes(row) && used + questionMinutes(row) <= limit);
+    if (!fits.length) break;
+    const score = ({ row, noise }) => {
+      const topicGap = (topicTarget(row.topic) - (usedTopic.get(row.topic) || 0)) / (topicTarget(row.topic) || 1);
+      const level = difficultyOf(row);
+      const levelGap = ratioTotal ? (difficultyTarget(level) - (usedLevel.get(level) || 0)) / (difficultyTarget(level) || 1) : 0;
+      return topicGap + levelGap + noise * 0.6;
+    };
+    const best = fits.reduce((a, b) => (score(b) > score(a) ? b : a)).row;
+    picked.push(best);
+    used += questionMinutes(best);
+    usedTopic.set(best.topic, (usedTopic.get(best.topic) || 0) + questionMinutes(best));
+    usedLevel.set(difficultyOf(best), (usedLevel.get(difficultyOf(best)) || 0) + questionMinutes(best));
+    if (used >= options.minutes * 0.97) break;
+  }
+  const typeOrder = PAPER_TYPES.map(([value]) => value);
+  picked.sort((a, b) => typeOrder.indexOf(a.question_type) - typeOrder.indexOf(b.question_type) ||
+    options.topics.indexOf(a.topic) - options.topics.indexOf(b.topic));
+  const warnings = [];
+  if (!pool.length) warnings.push('题库里没有符合条件的题。请放宽条件，或先分析更多试卷存进题库。');
+  else if (used < options.minutes * 0.9) warnings.push(`符合条件的题不够：只凑到约 ${Math.round(used)} 分钟。可以放宽知识点、题型或难度，或分析更多试卷。`);
+  ['easy', 'medium', 'hard'].forEach((level) => {
+    const want = difficultyTarget(level);
+    const got = usedLevel.get(level) || 0;
+    if (want >= 10 && got < want * 0.6) warnings.push(`${DIFFICULTY_LABELS[level]}的题偏少（目标约 ${Math.round(want)} 分钟，实际 ${Math.round(got)} 分钟）。`);
+  });
+  return { picked, minutes: used, warnings, poolSize: pool.length };
+}
+
+const DIFFICULTY_LABELS = Object.fromEntries(DIFFICULTIES);
+
+function paperOptions() {
+  const custom = Number($('pMinutesCustom').value);
+  return {
+    subject: $('pbSubject').value,
+    minutes: $('pMinutes').value === 'custom' ? custom : Number($('pMinutes').value),
+    topics: [...document.querySelectorAll('#pTopics input:checked')].map((box) => box.value),
+    types: [...document.querySelectorAll('#pTypes input:checked')].map((box) => box.value),
+    ratio: { easy: Number($('pEasy').value) || 0, medium: Number($('pMedium').value) || 0, hard: Number($('pHard').value) || 0 },
+    includeUnlabelled: $('pUnlabelled').checked,
+  };
+}
+
+async function openPaperView() {
+  paperState.rows = await bankRows();
+  const subjects = [...new Set(paperState.rows.map((row) => row.subject).filter(Boolean))];
+  const select = $('pbSubject');
+  const previous = select.value;
+  select.textContent = '';
+  subjects.forEach((subject) => select.append(new Option(subject, subject)));
+  if (subjects.includes(previous)) select.value = previous;
+  $('paperEmpty').hidden = subjects.length > 0;
+  $('paperForm').hidden = subjects.length === 0;
+  renderPaperTopics();
+}
+
+function renderPaperTopics() {
+  const host = $('pTopics');
+  host.textContent = '';
+  const rows = paperState.rows.filter((row) => row.subject === $('pbSubject').value);
+  const counts = new Map();
+  rows.forEach((row) => counts.set(row.topic, (counts.get(row.topic) || 0) + 1));
+  const order = topicsForSubject(state.taxonomy || DEFAULT_TAXONOMY, $('pbSubject').value);
+  [...counts.keys()].sort((a, b) => order.indexOf(a) - order.indexOf(b)).forEach((topic) => {
+    const label = el('label', 'check');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.value = topic;
+    box.checked = true;
+    label.append(box, document.createTextNode(` ${topic}（${counts.get(topic)}）`));
+    host.append(label);
+  });
+  const labelled = rows.filter((row) => row.difficulty).length;
+  $('pLabelled').textContent = `这个科目题库里 ${rows.length} 题，已标难度 ${labelled} 题。`;
+}
+
+function buildPaper(newSeed) {
+  if (newSeed) paperState.seed = Math.floor(Math.random() * 1e9);
+  const options = paperOptions();
+  if (!(options.minutes >= 5)) {
+    showAlert($('paperWarn'), '时长不对', '请填写 5 分钟以上的时长。');
+    return;
+  }
+  const result = assemblePaper(paperState.rows, options, seededRandom(paperState.seed));
+  paperState.picked = result.picked;
+  paperState.options = options;
+  paperState.warnings = result.warnings;
+  renderPaperView();
+}
+
+function renderPaperView() {
+  const { picked, options } = paperState;
+  const marks = picked.reduce((sum, row) => sum + (row.marks || 0), 0);
+  const minutes = picked.reduce((sum, row) => sum + questionMinutes(row), 0);
+  $('paperWarn').hidden = true;
+  if (paperState.warnings.length) showAlert($('paperWarn'), '提醒', paperState.warnings.join(' '));
+  const byLevel = ['easy', 'medium', 'hard', ''].map((level) => [level, picked.filter((row) => (row.difficulty || '') === level).length]).filter(([, n]) => n);
+  $('paperSummary').textContent = picked.length
+    ? `${picked.length} 题，共 ${marks} 分，预计 ${Math.round(minutes)} 分钟（目标 ${options.minutes} 分钟）。难度：${byLevel.map(([level, n]) => `${DIFFICULTY_LABELS[level] || '未标注'} ${n}`).join('、')}。`
+    : '';
+  const host = $('paperList');
+  host.textContent = '';
+  picked.forEach((row, index) => {
+    const item = el('article', 'panel card paper-item');
+    const head = el('div', 'card-head');
+    head.append(el('span', 'qno', `第 ${index + 1} 题`), el('span', 'tag', `${row.marks} 分`), el('span', 'tag', row.topic));
+    const level = makeSelect([['', '未标注'], ...DIFFICULTIES], row.difficulty || '', (value) => setBankDifficulty(row, value), `第 ${index + 1} 题难度`);
+    const swap = el('button', '', '换一题');
+    swap.type = 'button';
+    swap.addEventListener('click', () => swapPaperQuestion(index));
+    const remove = el('button', '', '删除');
+    remove.type = 'button';
+    remove.addEventListener('click', () => { paperState.picked.splice(index, 1); renderPaperView(); });
+    const tools = el('div', 'row');
+    tools.append(level, swap, remove);
+    const note = row.difficulty_source === 'vcaa-report' ? ` · 难度来自考试报告（得分率 ${Math.round(row.facility * 100)}%）` : '';
+    const image = el('img', 'qshot');
+    image.src = row.snapshot;
+    image.alt = `第 ${index + 1} 题`;
+    item.append(head, el('div', 'source-line', `来源：${row.source.label}${note}`), image, tools);
+    host.append(item);
+  });
+  $('paperTools').hidden = !picked.length;
+}
+
+// 换一题：同知识点、同难度、同题型、时长接近，题库里没有就放宽到同知识点。
+function swapPaperQuestion(index) {
+  const current = paperState.picked[index];
+  const { options } = paperState;
+  const free = paperState.rows.filter((row) => row.subject === options.subject && row.snapshot && row.marks > 0 &&
+    !paperState.picked.includes(row) && options.types.includes(row.question_type));
+  const close = (row) => Math.abs(questionMinutes(row) - questionMinutes(current));
+  const ranked = [
+    free.filter((row) => row.topic === current.topic && (row.difficulty || '') === (current.difficulty || '')),
+    free.filter((row) => row.topic === current.topic),
+  ].find((list) => list.length);
+  if (!ranked) {
+    showAlert($('paperWarn'), '没有可替换的题', '题库里没有同知识点的其他题。');
+    return;
+  }
+  const random = Math.random;
+  ranked.sort((a, b) => close(a) - close(b) || random() - 0.5);
+  paperState.picked[index] = ranked[0];
+  renderPaperView();
+}
+
+async function setBankDifficulty(row, value) {
+  row.difficulty = value;
+  row.difficulty_source = value ? 'teacher' : '';
+  await bankRequest('readwrite', (store) => store.put(row));
+  renderPaperView();
+}
+
+function printPaper() {
+  const sheet = $('printSheet');
+  sheet.textContent = '';
+  const { picked, options } = paperState;
+  const marks = picked.reduce((sum, row) => sum + (row.marks || 0), 0);
+  const title = el('h1', '', $('pTitle').value.trim() || `${options.subject} 练习卷`);
+  const info = el('p', '', `时长 ${options.minutes} 分钟 · 共 ${picked.length} 题 · ${marks} 分`);
+  sheet.append(title, info, el('p', 'print-name', '姓名：____________________'));
+  picked.forEach((row, index) => {
+    const block = el('div', 'print-q');
+    block.append(el('div', 'print-label', `第 ${index + 1} 题（${row.marks} 分）`));
+    const image = el('img');
+    image.src = row.snapshot;
+    block.append(image);
+    sheet.append(block);
+  });
+  window.print();
+}
+
+function exportPaperList() {
+  const header = ['number', 'marks', 'minutes', 'topic', 'difficulty', 'difficulty_source', 'question_type', 'source', 'source_id'];
+  const lines = paperState.picked.map((row, index) => [index + 1, row.marks, questionMinutes(row), row.topic, row.difficulty || '',
+    row.difficulty_source || '', row.question_type, row.source.label, row.source_id]);
+  download('paper-list.csv', '﻿' + [header, ...lines].map((line) => line.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+function showView(name) {
+  $('analysisView').hidden = name !== 'analysis';
+  $('paperView').hidden = name !== 'paper';
+  $('tabAnalysis').classList.toggle('active', name === 'analysis');
+  $('tabPaper').classList.toggle('active', name === 'paper');
+  if (name === 'paper') openPaperView().catch((e) => showAlert($('paperWarn'), '题库读取失败', String(e)));
+}
+
 /* ---------- 非 AI 模式：关键词分类 ---------- */
 // 关键词来自 VCAA Study Design 和常见题面用语。多词短语比单词更可靠，权重更高。
 const TOPIC_KEYWORDS = {
@@ -5246,6 +5607,7 @@ async function runRules(taxonomy, started) {
     figures: q.images.map((image) => ({ page: null, image_id: image.id, description: 'Word 内嵌图片', sub_part: image.part })),
   }));
   state.questions = prepareQuestions(raw, taxonomy, paper.subject);
+  state.meta.report_difficulty = applyReportDifficulty(paper, state.questions);
   if (state.sourceKind !== 'docx') {
     state.questions.forEach((q, index) => {
       q.figures = questions[index].figures;
@@ -6135,10 +6497,17 @@ function renderCard(q) {
   });
   confirm.append(box, document.createTextNode('已确认'));
 
+  // 难度旁边注明来源；老师改过以后不再显示考试报告的得分率。
+  const difficultyField = fieldWrap(difficultyNote(q) ? `难度（${difficultyNote(q)}）` : '难度', makeSelect([['', '未标注'], ...DIFFICULTIES], q.difficulty, (value) => {
+    q.difficulty_source = value ? 'teacher' : '';
+    difficultyField.firstChild.textContent = value ? '难度（老师标注）' : '难度';
+    update('difficulty')(value);
+  }, `第 ${q.question_number} 题难度`));
+
   controls.append(
     fieldWrap('知识点', makeSelect(topicOptions(q), q.topic, update('topic'), `第 ${q.question_number} 题知识点`)),
     fieldWrap('题型', makeSelect(QUESTION_TYPES.map(([v, l]) => [v, `${l} (${v})`]), q.question_type, update('question_type'), `第 ${q.question_number} 题题型`)),
-    fieldWrap('难度', makeSelect([['', '未标注'], ...DIFFICULTIES], q.difficulty, update('difficulty'), `第 ${q.question_number} 题难度`)),
+    difficultyField,
     confirm,
   );
   card.append(controls, el('div', 'review-note'), el('div', 'orig'));
@@ -6584,6 +6953,8 @@ function exportRows(embed = true) {
     review_reasons: reviewReasons(q),
     question_type: q.question_type,
     difficulty: q.difficulty,
+    difficulty_source: q.difficulty_source || (q.difficulty ? 'teacher' : ''),
+    facility: q.facility === undefined ? null : q.facility,
     confidence: q.confidence,
     confirmed: q.confirmed,
     edited: isEdited(q),
@@ -6730,6 +7101,28 @@ function init() {
   $('priceOut').addEventListener('input', renderCost);
   $('exportJson').addEventListener('click', exportJson);
   $('bankJson').addEventListener('click', exportBankJson);
+  $('tabAnalysis').addEventListener('click', () => showView('analysis'));
+  $('tabPaper').addEventListener('click', () => showView('paper'));
+  PAPER_DURATIONS.forEach((minutes) => $('pMinutes').append(new Option(`${minutes} 分钟`, String(minutes))));
+  $('pMinutes').append(new Option('自定义', 'custom'));
+  $('pMinutes').value = '60';
+  $('pMinutes').addEventListener('change', () => { $('pMinutesCustom').hidden = $('pMinutes').value !== 'custom'; });
+  PAPER_TYPES.forEach(([value, label]) => {
+    const wrap = el('label', 'check');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.value = value;
+    box.checked = true;
+    wrap.append(box, document.createTextNode(` ${label}`));
+    $('pTypes').append(wrap);
+  });
+  $('pbSubject').addEventListener('change', renderPaperTopics);
+  $('pAll').addEventListener('click', () => document.querySelectorAll('#pTopics input').forEach((box) => { box.checked = true; }));
+  $('pNone').addEventListener('click', () => document.querySelectorAll('#pTopics input').forEach((box) => { box.checked = false; }));
+  $('pBuild').addEventListener('click', () => buildPaper(false));
+  $('pAgain').addEventListener('click', () => buildPaper(true));
+  $('pPrint').addEventListener('click', printPaper);
+  $('pExport').addEventListener('click', exportPaperList);
   $('bankCsv').addEventListener('click', exportBankCsv);
   $('bankClear').addEventListener('click', clearBank);
   renderBank().catch((e) => console.warn('题库读取失败', e));

@@ -6,3 +6,7 @@
 - `score.py <结果目录> labels_final errors`：计算严格和宽松准确率。
 
 改规则后要重新跑回归。final 这批已经用过一次，继续拿它调规则后，它的分数就不再是盲测结果，要换新试卷。
+## 难度表
+
+- `get_reports.ps1`：下载 VCAA 考试报告到被忽略的 `tmp-fixtures/reports/`。
+- `parse_reports.py <目录> <输出.json>`：算出每题得分率。结果写在 `index.html` 的 `VCAA_FACILITY`（只收正式考试；NHT 报告没有统计）。
