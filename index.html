@@ -5347,7 +5347,7 @@ function renderPaperView() {
     if (row.generated) {
       head.append(el('span', `tag ${row.check_ok ? '' : 'warn'}`, row.check_ok ? 'AI 出题 · 已核对' : 'AI 出题 · 需复核'));
       if (row.status !== 'approved') head.append(el('span', 'tag', GEN_STATUS[row.status]));
-      item.append(head, el('div', 'source-line', `${row.source.label} · 目标难度 ${DIFFICULTY_LABELS[row.difficulty] || ''} · 规范第 ${row.spec_version} 版`),
+      item.append(head, el('div', 'source-line', `${row.source.label} · 目标难度 ${DIFFICULTY_LABELS[row.difficulty] || ''} · ${row.spec_version ? `规范第 ${row.spec_version} 版` : '默认规范'}`),
         el('div', 'hint', checkSummary(row)), generatedBody(row, false), tools, reviewControls(row, async () => {
           paperState.rows = await bankRows();
           renderPaperView();
@@ -5422,7 +5422,7 @@ function printPaper() {
       const line = el('div', 'print-q');
       line.append(el('div', 'print-label', `第 ${index + 1} 题`));
       if (row.generated) {
-        line.append(el('div', 'qtext', row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${a.value}`).join('；')), el('div', 'qtext', row.solution), el('div', 'qtext', `评分：${row.marking}`));
+        line.append(el('div', 'qtext', row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${a.value}`).join('；')), richText('div', 'qtext', row.solution), richText('div', 'qtext', `评分：${row.marking}`));
       } else {
         line.append(el('div', '', `原卷题目，答案见 VCAA 评分报告：${row.source.label}`));
       }
@@ -5476,7 +5476,7 @@ const DEFAULT_SPEC = `## 通用
 
 const AI_DB_VERSION = 2;
 const GEN_REASONS = ['答案错', '太简单', '太难', '超纲', '用语不像 VCAA', '和原题太像', '缺条件或有歧义', '其他'];
-const aiState = { running: false, abort: null, usage: { promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 } };
+const aiState = { running: false, abort: null, rejected: [], usage: { promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 } };
 
 function aiKey() {
   return storageGet(STORE.key) || '';
@@ -5489,7 +5489,9 @@ function aiModel() {
 async function aiCall(parts, schema) {
   const key = aiKey();
   if (!key) throw new UserError('还没有 Gemini Key', '在左侧“AI 服务”选 Google Gemini，填好 Key 后再出题。Key 只存在这台电脑上。');
-  const data = await postGemini({ apiKey: key, model: aiModel(), parts, schema, signal: aiState.abort ? aiState.abort.signal : undefined });
+  // 免费层每分钟有次数限制，被限流时按 Gemini 建议的时间自动等一次再试。
+  const signal = aiState.abort ? aiState.abort.signal : new AbortController().signal;
+  const data = await postWithRetry({ apiKey: key, model: aiModel(), parts, schema, signal });
   const { parsed, usage } = readJson(data);
   aiState.usage = mergeUsage(aiState.usage, usage);
   return parsed;
@@ -5633,7 +5635,7 @@ Output rules:
 - "answers": the final answer for ${choice ? 'label "MC", value = the correct letter' : 'each part label'}.
 - "solution": a complete worked solution. "marking": which step earns each mark.
 - "skill": one sentence on what the question tests. "difficulty": your own estimate.
-- LaTeX inside \\( \\) or \\[ \\]. Plain text otherwise.`;
+- LaTeX inside \\( \\) or \\[ \\]. Plain text otherwise: no Markdown, no asterisks or bullet symbols. To stress a word, write it in capitals (e.g. NOT), as VCAA does in bold.`;
 }
 
 function generatedText(row) {
@@ -5679,8 +5681,17 @@ function localChecks(row, request, examples) {
     if (sum !== request.marks) fatal.push(`小问分值合计 ${sum} 分，应为 ${request.marks} 分`);
     if (!row.gen_parts.length) fatal.push('没有小问');
   }
-  const copied = examples.map((ex) => textOverlap(text, ex.text || generatedText(ex))).reduce((a, b) => Math.max(a, b), 0);
-  if (copied > 0.5) fatal.push('和范例的文字重合太多');
+  // 只比题干。VCAA 的措辞很固定（如 “dilation by a factor of … from the y-axis”），
+  // 所以措辞像但数字换掉了不算照抄；措辞像、数字也基本一样才算。
+  const numbers = (value) => new Set(latexToPlain(String(value || '')).match(/\d+(?:\.\d+)?/g) || []);
+  const mine = numbers(row.stem);
+  const copiedFrom = examples.find((ex) => {
+    const theirs = ex.text || generatedText(ex);
+    if (textOverlap(row.stem, theirs) <= 0.5) return false;
+    const shared = [...mine].filter((n) => numbers(theirs).has(n)).length;
+    return !mine.size || shared / mine.size >= 0.6;
+  });
+  if (copiedFrom) fatal.push('和范例的题干几乎一样，数字也没换');
   const ruled = classifyByRules({ text: row.stem, sub_parts: row.gen_parts.map((p) => ({ ...p })), area: null }, { subject: request.subject, unit: 'Unit 3/4' }, state.taxonomy || DEFAULT_TAXONOMY);
   if (ruled && ruled.topic !== request.topic) notes.push(`本地规则判为 ${ruled.topic}`);
   return { notes, fatal };
@@ -5750,7 +5761,11 @@ async function generateQuestion(request, examples, spec, onStep) {
     };
     row.text = generatedText(row);
     const { notes, fatal } = localChecks(row, request, examples);
-    if (fatal.length) { lastFatal = fatal; continue; }
+    if (fatal.length) {
+      lastFatal = fatal;
+      aiState.rejected.push({ row, fatal }); // 留着被拦下的题，方便检查本地规则是否太严。
+      continue;
+    }
     onStep('独立重做核对答案…');
     const results = await independentCheck(row);
     const wrong = results.filter((r) => !r.same);
@@ -5862,19 +5877,28 @@ async function reviewGenerated(row, decision, reasons, note) {
 const GEN_STATUS = { pending: '待审核', approved: '已通过', rejected: '已退回' };
 const AI_COST_PER_QUESTION = 0.05; // 粗估：出题、独立重做、必要时比对，共 2–3 次调用，按 gemini-3.6-flash 现价。以实际用量为准。
 
+// AI 偶尔仍会用 Markdown 的 **粗体**：显示成粗体，不显示星号。只建文字节点，不用 innerHTML。
+function richText(tag, className, text) {
+  const node = el(tag, className);
+  String(text || '').split(/\*\*(.+?)\*\*/g).forEach((piece, index) => {
+    node.append(index % 2 ? el('strong', '', piece) : document.createTextNode(piece.replace(/^\s*\*\s+/gm, '• ')));
+  });
+  return node;
+}
+
 function generatedBody(row, forPrint) {
   const body = el('div', 'gen-body');
-  body.append(el('div', 'qtext', row.stem));
+  body.append(richText('div', 'qtext', row.stem));
   if (row.options.length) {
     const list = el('ol', 'gen-options');
-    row.options.forEach((option) => list.append(el('li', 'qtext', option)));
+    row.options.forEach((option) => list.append(richText('li', 'qtext', option)));
     body.append(list);
   }
   if (row.gen_parts.length) {
     const list = el('ol', 'parts');
     row.gen_parts.forEach((part) => {
       const item = el('li');
-      item.append(el('span', 'pl', `${part.label}.`), el('span', 'qtext', part.text), el('span', 'pm', `${part.marks} 分`));
+      item.append(el('span', 'pl', `${part.label}.`), richText('span', 'qtext', part.text), el('span', 'pm', `${part.marks} 分`));
       list.append(item);
     });
     body.append(list);
@@ -5883,7 +5907,7 @@ function generatedBody(row, forPrint) {
     const more = el('details', 'gen-answer');
     more.append(el('summary', '', '答案、解答和评分要点'));
     more.append(el('div', 'qtext', `答案：${row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${a.value}`).join('；')}`));
-    more.append(el('div', 'qtext', row.solution), el('div', 'qtext hint', `评分：${row.marking}`));
+    more.append(richText('div', 'qtext', row.solution), richText('div', 'qtext hint', `评分：${row.marking}`));
     if (row.skill) more.append(el('div', 'hint', `考查：${row.skill}`));
     body.append(more);
   }
@@ -5981,7 +6005,8 @@ async function generateForPaper() {
     return;
   }
   const cost = (requests.length * AI_COST_PER_QUESTION).toFixed(2);
-  if (!window.confirm(`将由 AI 出 ${requests.length} 道题，每道题出完后会独立重做一遍核对答案。\n预计费用约 $${cost}（粗估，以实际用量为准）。\n继续吗？`)) return;
+  const calls = `${requests.length * 2}–${requests.length * 3}`;
+  if (!window.confirm(`将由 AI 出 ${requests.length} 道题，每道题出完后会独立重做一遍核对答案，共约 ${calls} 次调用。\n免费层每天的次数有限（gemini-3.6-flash 实测约 20 次），用完要等第二天。\n付费层预计约 $${cost}（粗估，以实际用量为准）。\n继续吗？`)) return;
   setPaperBusy(true);
   const before = aiState.usage;
   try {

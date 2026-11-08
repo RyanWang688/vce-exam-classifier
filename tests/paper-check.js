@@ -59,6 +59,9 @@
   const copyText = 'Consider the function f defined for all real numbers x by the rule given below and find the derivative at the point';
   const copied = { ...good, stem: copyText };
   check('照抄范例时拒绝', localChecks(copied, request, [{ text: copyText }]).fatal.length > 0);
+  const stock = 'The graph of y = f(x) is transformed by a dilation by a factor of 3 from the y-axis followed by a translation of 2 units in the positive direction of the x-axis';
+  const reworded = { ...good, stem: stock.replace('factor of 3', 'factor of 5').replace('2 units', '4 units') };
+  check('措辞固定但数字换了不算照抄', localChecks(reworded, request, [{ text: stock }]).fatal.length === 0);
   const choice = { stem: 'Q', options: ['1', '2', '3', '4'], gen_parts: [], answers: [{ label: 'MC', value: 'E' }], solution: '' };
   check('选择题答案不在选项里时拒绝', localChecks(choice, { ...request, question_type: 'multiple choice', marks: 1 }, []).fatal.length > 0);
   check('答案写法不同也算相同', sameAnswer('\\left( 2 \\right)', '(2)'));
