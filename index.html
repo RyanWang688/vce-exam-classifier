@@ -181,6 +181,11 @@
 
   .qshot { display: block; width: 100%; height: auto; margin-top: 8px; background: #fff; }
   .bank { margin-bottom: 12px; padding: 12px 16px; }
+  .queue { margin-bottom: 12px; padding: 12px 16px; }
+  .queue ol { margin: 6px 0 0; padding-left: 22px; font-size: 13px; }
+  .queue .queue-done { color: var(--ok, inherit); }
+  .queue .queue-failed { color: var(--danger, inherit); }
+  .queue .queue-running { font-weight: 600; }
   .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
   .tab { border-radius: 999px; }
   .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -432,6 +437,10 @@
     </div>
 
     <div id="analysisView">
+    <div id="queuePanel" class="panel queue" hidden>
+      <b id="queueTitle"></b>
+      <ol id="queueList"></ol>
+    </div>
     <div id="error" class="alert" hidden></div>
     <div id="warning" class="alert warn" hidden></div>
 
@@ -570,7 +579,7 @@ const PROVIDERS = {
 };
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_CHARS = 20 * 1024 * 1024; // 官方说明内联图片时请求总大小上限为 20MB。
-const DROP_HINT = '点击选择或拖入 PDF、Word（.docx）或图片。多页试卷可一次选多张图片，按文件名排序';
+const DROP_HINT = '点击选择或拖入 PDF、Word（.docx）或图片。可一次选多份 PDF / Word，排队分析入库；多页试卷可一次选多张图片，按文件名排序';
 const LOW_CONFIDENCE = 0.7;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
@@ -4389,6 +4398,10 @@ function parseQuestions(rows) {
         text: inline, sub_parts: [], options: 0, images: [], math_problems: [...(row.math_problems || [])],
         regions: row.page ? [{ page: row.page, top: row.top }] : [],
         page: row.page || null,
+        // 题号行的位置：组卷时把原题号换成新题号。题号行里还有题目文字时不替换，免得涂掉内容。
+        // OCR 偶尔在题号行末尾多读出一个杂点（没有字母），这时仍按纯题号行处理。
+        heading: row.page && !/[A-Za-z]{2}/.test(latexToPlain(inline)) && row.right !== undefined
+          ? { page: row.page, top: row.top, bottom: row.bottom, left: row.left, right: row.right, withMarks: marks !== null } : null,
       };
       part = null;
       questions.push(question);
@@ -4615,9 +4628,19 @@ function lastInkRatio({ ink, width, height }, top, bottom) {
   return top;
 }
 
-function stackCanvases(canvases, maxWidth) {
+function stackCanvases(canvases, maxWidth, layout) {
   const width = Math.min(maxWidth, Math.max(...canvases.map((c) => c.width)));
   const scaled = canvases.map((c) => ({ c, h: Math.round(c.height * width / c.width) }));
+  if (layout) {
+    let top = 0;
+    layout.pieces = scaled.map(({ c, h }) => {
+      const item = { top, scale: width / c.width };
+      top += h + 12;
+      return item;
+    });
+    layout.width = width;
+    layout.height = top;
+  }
   const output = document.createElement('canvas');
   output.width = width;
   output.height = scaled.reduce((sum, item) => sum + item.h + 12, 0);
@@ -4661,6 +4684,14 @@ function coverWarning(cover, questions) {
 function regionBounds(questions, pages) {
   questions.forEach((q, index) => {
     const next = questions[index + 1];
+    if (q.heading) {
+      const page = pages[q.heading.page - 1];
+      q.headingRatio = {
+        page: q.heading.page, withMarks: q.heading.withMarks,
+        top: q.heading.top / page.height, bottom: q.heading.bottom / page.height,
+        left: q.heading.left / page.width, right: q.heading.right / page.width,
+      };
+    }
     q.regions.forEach((region, i) => {
       const page = pages[region.page - 1];
       const nextRegion = q.regions[i + 1];
@@ -4881,6 +4912,16 @@ function compactPiece(canvas) {
     if (!(b - a > 1)) context.drawImage(canvas, 0, a, width, 1, 0, at, width, 1);
     at += b - a;
   });
+  // 原图的第 y 行在压缩后的位置。
+  output.mapY = (yy) => {
+    let pos = 0;
+    for (const [a, b] of keep) {
+      if (yy < a) return pos;
+      if (yy < b) return pos + (yy - a);
+      pos += b - a;
+    }
+    return pos;
+  };
   return output;
 }
 
@@ -4902,8 +4943,9 @@ function inkColumns(canvas) {
 }
 
 // 切题：从原卷精确裁出一道题。多页的题上下拼接。
-async function cutQuestion(regions, pageMarks) {
+async function cutQuestion(regions, pageMarks, heading) {
   const pieces = [];
+  let headingAt = null;
   for (const region of regions) {
     const clean = withoutSideBars(await getPageCanvas(region.page));
     const y = Math.round(region.topRatio * clean.height);
@@ -4928,6 +4970,14 @@ async function cutQuestion(regions, pageMarks) {
     const compact = compactPiece(piece);
     if (compact) {
       compact.pageLeft = region.pageLeft * clean.width;
+      if (heading && !headingAt && heading.page === region.page && heading.top >= region.topRatio - 0.002 && heading.bottom <= region.cutBottom) {
+        const y0 = Math.round(heading.top * clean.height) - y;
+        const y1 = Math.round(heading.bottom * clean.height) - y;
+        headingAt = {
+          piece: pieces.length, x0: heading.left * clean.width, x1: heading.right * clean.width,
+          y0: compact.mapY(Math.max(0, y0)), y1: compact.mapY(Math.min(h, y1)),
+        };
+      }
       pieces.push(compact);
     }
   }
@@ -4951,7 +5001,21 @@ async function cutQuestion(regions, pageMarks) {
     context.drawImage(piece, 8 - bounds[index].left, 0);
     return output;
   });
-  return stackCanvases(trimmed, 1300);
+  const layout = {};
+  const image = stackCanvases(trimmed, 1300, layout);
+  let headingBox = null;
+  if (headingAt && headingAt.y1 > headingAt.y0) {
+    const { top, scale } = layout.pieces[headingAt.piece];
+    const shift = 8 - bounds[headingAt.piece].left;
+    headingBox = {
+      x0: Math.max(0, (headingAt.x0 + shift) * scale / layout.width),
+      x1: Math.min(1, (headingAt.x1 + shift) * scale / layout.width),
+      y0: (top + headingAt.y0 * scale) / layout.height,
+      y1: (top + headingAt.y1 * scale) / layout.height,
+      withMarks: heading.withMarks,
+    };
+  }
+  return { image, headingBox };
 }
 
 // 图上的轴名、点名和坐标被当成文字遮掉了，裁图时要把它们收回来；整行正文不算。
@@ -5021,7 +5085,9 @@ async function attachPdfImages(questions, onProgress) {
         });
       });
     }
-    q.snapshot = await cutQuestion(q.regions, pageMarks);
+    const cut = await cutQuestion(q.regions, pageMarks, q.headingRatio);
+    q.snapshot = cut ? cut.image : null;
+    q.heading_box = cut ? cut.headingBox : null;
     delete q.regions;
   }
 }
@@ -5391,8 +5457,10 @@ function renderPaperView() {
     const image = el('img', 'qshot');
     image.src = row.snapshot;
     image.alt = `第 ${index + 1} 题`;
-    item.append(head, el('div', 'source-line', `来源：${row.source.label}${note}`), image, tools);
+    const relabel = row.heading_box ? '' : ' · 原题号没有替换：这道题是旧版本入库的，重新分析这份试卷后即可替换';
+    item.append(head, el('div', 'source-line', `来源：${row.source.label}${note}${relabel}`), image, tools);
     host.append(item);
+    relabeledSnapshot(row, index + 1).then((url) => { if (url) image.src = url; }).catch(() => {});
   });
   $('paperTools').hidden = !picked.length;
   const spent = paperState.spent;
@@ -5427,7 +5495,7 @@ async function setBankDifficulty(row, value) {
   renderPaperView();
 }
 
-function printPaper() {
+async function printPaper() {
   const sheet = $('printSheet');
   sheet.textContent = '';
   const { picked, options } = paperState;
@@ -5435,14 +5503,20 @@ function printPaper() {
   const title = el('h1', '', $('pTitle').value.trim() || `${options.subject} 练习卷`);
   const info = el('p', '', `时长 ${options.minutes} 分钟 · 共 ${picked.length} 题 · ${marks} 分`);
   sheet.append(title, info, el('p', 'print-name', '姓名：____________________'));
+  const marksText = (row) => `${row.marks} mark${row.marks === 1 ? '' : 's'}`;
+  const images = await Promise.all(picked.map((row, index) => (row.generated ? null : relabeledSnapshot(row, index + 1).catch(() => null))));
   picked.forEach((row, index) => {
     const block = el('div', 'print-q');
-    block.append(el('div', 'print-label', `第 ${index + 1} 题（${row.marks} 分）`));
     if (row.generated) {
-      block.append(generatedBody(row, true));
+      // AI 题也用 VCAA 的题号样式，和真题一致。
+      const label = el('div', 'print-label');
+      label.append(el('strong', '', `Question ${index + 1}`), document.createTextNode(` (${marksText(row)})`));
+      block.append(label, generatedBody(row, true));
     } else {
+      // 换好题号的裁图不再另加题号；换不了的保留原图，在上方注明新题号。
+      if (!images[index]) block.append(el('div', 'print-label', `第 ${index + 1} 题（${row.marks} 分，图中为原题号）`));
       const image = el('img');
-      image.src = row.snapshot;
+      image.src = images[index] || row.snapshot;
       block.append(image);
     }
     sheet.append(block);
@@ -5452,7 +5526,7 @@ function printPaper() {
     key.append(el('h2', '', '答案'));
     picked.forEach((row, index) => {
       const line = el('div', 'print-q');
-      line.append(el('div', 'print-label', `第 ${index + 1} 题`));
+      line.append(el('div', 'print-label', `Question ${index + 1}`));
       if (row.generated) {
         line.append(el('div', 'qtext', row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${a.value}`).join('；')), richText('div', 'qtext', row.solution), richText('div', 'qtext', `评分：${row.marking}`));
       } else {
@@ -5464,6 +5538,123 @@ function printPaper() {
   }
   renderMath(sheet);
   window.print();
+}
+
+// 组卷时把裁图里的原题号涂掉，按 VCAA 的样式写上新题号。旧的题库记录没有题号位置，保持原样。
+const relabelCache = new Map();
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+function inkBounds(context, x0, y0, x1, y1) {
+  const width = Math.round(x1 - x0);
+  const height = Math.round(y1 - y0);
+  if (width < 2 || height < 2) return null;
+  const { data } = context.getImageData(Math.round(x0), Math.round(y0), width, height);
+  const dark = (x, y) => {
+    const i = (y * width + x) * 4;
+    return data[i] + data[i + 1] + data[i + 2] < 480;
+  };
+  const columnHasInk = (x) => {
+    for (let y = 0; y < height; y++) if (dark(x, y)) return true;
+    return false;
+  };
+  // 从左往右读题号，遇到比一个字高还宽的空隙就停：后面的杂点或别的内容不算题号。
+  let left = 0;
+  while (left < width && !columnHasInk(left)) left += 1;
+  if (left >= width) return null;
+  let right = left;
+  let gap = 0;
+  for (let x = left; x < width; x++) {
+    if (columnHasInk(x)) {
+      right = x;
+      gap = 0;
+    } else if (++gap > height) {
+      break;
+    }
+  }
+  let top = height;
+  let bottom = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = left; x <= right; x++) {
+      if (dark(x, y)) {
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+        break;
+      }
+    }
+  }
+  if (bottom < 0 || bottom - top < 4) return null;
+  return { top: y0 + top, bottom: y0 + bottom + 1, left: x0 + left, right: x0 + right + 1 };
+}
+
+async function relabeledSnapshot(row, number) {
+  const box = row.heading_box;
+  if (!box || !row.snapshot) return null;
+  const key = `${row.source_id}|${number}`;
+  if (relabelCache.has(key)) return relabelCache.get(key);
+  const image = await loadImage(row.snapshot);
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0);
+  const x0 = box.x0 * canvas.width;
+  const x1 = box.x1 * canvas.width;
+  const y0 = box.y0 * canvas.height;
+  const y1 = box.y1 * canvas.height;
+  // 量出原题号实际的墨迹范围，新题号按它的高度和宽度定字号，看起来和原来一样大。
+  const ink = inkBounds(context, Math.max(0, x0 - 4), Math.max(0, y0 - 3), Math.min(canvas.width, x1 + 6), Math.min(canvas.height, y1 + 3));
+  context.fillStyle = '#fff';
+  // 量到了题号的墨迹就只擦题号本身；量不到才擦整个题号行。
+  const eraseRight = ink ? ink.right + 6 : x1 + 6;
+  context.fillRect(Math.max(0, x0 - 4), Math.min(y0, ink ? ink.top : y0) - 3, eraseRight - x0 + 4, Math.max(y1, ink ? ink.bottom : y1) - Math.min(y0, ink ? ink.top : y0) + 6);
+  const marksText = ` (${row.marks} mark${row.marks === 1 ? '' : 's'})`;
+  const bold = (px) => `bold ${px}px Arial, Helvetica, sans-serif`;
+  const plain = (px) => `${px}px Arial, Helvetica, sans-serif`;
+  const widthAt = (px, num) => {
+    context.font = bold(px);
+    let width = context.measureText(`Question ${num}`).width;
+    if (box.withMarks) {
+      context.font = plain(px);
+      width += context.measureText(marksText).width;
+    }
+    return width;
+  };
+  let size;
+  let left = x0;
+  let baseline;
+  if (ink) {
+    // Arial 的大写字母高约 0.72 个字号，加上 Q 的尾巴约 0.93 个字号。
+    const byHeight = (ink.bottom - ink.top) / 0.93;
+    const byWidth = byHeight * (ink.right - ink.left) / widthAt(byHeight, row.question_number || number);
+    size = Math.min(byHeight * 1.15, Math.max(byHeight * 0.85, byWidth));
+    left = ink.left;
+    baseline = ink.top + size * 0.72;
+  } else {
+    // 量不到墨迹时，按题号行的框估计：框高约是字号的 1.3 倍。
+    size = Math.max(10, (y1 - y0) / 1.3);
+    baseline = y0 + size;
+  }
+  context.fillStyle = '#000';
+  context.textBaseline = 'alphabetic';
+  context.font = bold(size);
+  const label = `Question ${number}`;
+  context.fillText(label, left, baseline);
+  if (box.withMarks) {
+    const offset = context.measureText(label).width;
+    context.font = plain(size);
+    context.fillText(marksText, left + offset, baseline);
+  }
+  const url = canvas.toDataURL('image/jpeg', 0.92);
+  relabelCache.set(key, url);
+  return url;
 }
 
 function exportPaperList() {
@@ -6740,6 +6931,7 @@ async function runRules(taxonomy, started) {
     state.questions.forEach((q, index) => {
       q.figures = questions[index].figures;
       q.snapshot = questions[index].snapshot;
+      q.heading_box = questions[index].heading_box;
       q.area = questions[index].area;
     });
   }
@@ -7376,19 +7568,28 @@ async function bankRequest(mode, action, storeName = 'questions') {
 const bankRows = () => bankRequest('readonly', (store) => store.getAll());
 
 // 同一题重新分析或修改后覆盖旧记录，题目 ID 由来源信息决定。
+async function saveBankNow() {
+  if (!state.questions.length || !state.paper) return;
+  try {
+    const { subject, unit } = state.paper;
+    const rows = exportRows(true).map((row) => ({ ...row, subject, unit, saved_at: new Date().toISOString() }));
+    await bankRequest('readwrite', (store) => {
+      let last;
+      rows.forEach((row) => { last = store.put(row); });
+      return last;
+    });
+    await renderBank();
+  } catch (e) {
+    console.warn('题库保存失败', e);
+  }
+}
+
 function queueBankSave() {
   clearTimeout(bankTimer);
   if (!state.questions.length) return;
   bankTimer = setTimeout(async () => {
     try {
-      const { subject, unit } = state.paper;
-      const rows = exportRows(true).map((row) => ({ ...row, subject, unit, saved_at: new Date().toISOString() }));
-      await bankRequest('readwrite', (store) => {
-        let last;
-        rows.forEach((row) => { last = store.put(row); });
-        return last;
-      });
-      await renderBank();
+      await saveBankNow();
     } catch (e) {
       console.warn('题库保存失败', e);
     }
@@ -7735,8 +7936,9 @@ function setFiles(selected) {
     showAlert($('error'), '文件类型不支持', '请上传 PDF、Word（.docx）或图片文件。');
     return;
   }
-  if (files.length > 1 && (kinds.size > 1 || !kinds.has('images'))) {
-    showAlert($('error'), '不能混合上传', '一次只能上传一个 PDF 或 Word 文件，或者多张图片。');
+  // 多份 PDF / Word：每份是一份试卷，排队分析。多张图片：合起来是一份试卷。两者不能混在一起。
+  if (files.length > 1 && kinds.has('images') && kinds.size > 1) {
+    showAlert($('error'), '不能混合上传', '图片要单独上传（多张图片合成一份试卷）；PDF 和 Word 可以一次选多份。');
     return;
   }
   const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
@@ -7746,13 +7948,17 @@ function setFiles(selected) {
   }
 
   // 图片按文件名的自然顺序排页，page2 排在 page10 前面。
-  state.files = files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  state.file = state.files[0];
+  const sorted = files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const total = files.reduce((sum, file) => sum + file.size, 0);
+  state.queue = files.length > 1 && !kinds.has('images') ? sorted : [];
+  state.files = state.queue.length ? [sorted[0]] : sorted;
+  state.file = state.files[0];
   $('drop').classList.add('has-file');
-  $('dropText').textContent = files.length > 1
-    ? `${files.length} 张图片（共 ${formatMB(total)}）：${files[0].name} … ${files[files.length - 1].name}`
-    : `${files[0].name}（${formatMB(total)}）`;
+  $('dropText').textContent = state.queue.length
+    ? `${files.length} 份试卷（共 ${formatMB(total)}），将依次分析并存进题库：${sorted.map((file) => file.name).join('、')}`
+    : files.length > 1
+      ? `${files.length} 张图片（共 ${formatMB(total)}）：${files[0].name} … ${files[files.length - 1].name}`
+      : `${files[0].name}（${formatMB(total)}）`;
   updateButton();
 }
 
@@ -7838,7 +8044,67 @@ async function relocateFigures() {
   }
 }
 
+// 多份试卷排队：一份分析完、存进题库，再分析下一份。某一份出错不影响后面的。
 async function analyze() {
+  if (!state.queue || state.queue.length < 2) {
+    await analyzeCurrent();
+    return;
+  }
+  const queue = state.queue;
+  if (!currentProvider().rules && !window.confirm(`将用 ${currentProvider().label.replace(' API Key', '')} 依次分析 ${queue.length} 份试卷，每份至少 1 次调用。\n用非 AI 模式不需要调用。继续吗？`)) return;
+  state.queueStop = false;
+  const results = queue.map((file) => ({ file, status: 'waiting', note: '' }));
+  const render = () => {
+    $('queuePanel').hidden = false;
+    const done = results.filter((r) => r.status === 'done').length;
+    const failed = results.filter((r) => r.status === 'failed').length;
+    const stopping = state.queueStop && results.some((r) => r.status === 'running') ? '。已要求停止：正在分析的这份做完就停' : '';
+    $('queueTitle').textContent = `批量入库：${done} / ${queue.length} 份已完成${failed ? `，${failed} 份失败` : ''}${stopping}`;
+    const list = $('queueList');
+    list.textContent = '';
+    results.forEach((r) => {
+      const label = { waiting: '等待', running: '分析中…', done: '已入库', failed: '失败', skipped: '已停止' }[r.status];
+      list.append(el('li', `queue-${r.status}`, `${r.file.name}：${label}${r.note ? `，${r.note}` : ''}`));
+    });
+  };
+  state.renderQueue = render;
+  for (const r of results) {
+    if (state.queueStop) {
+      r.status = 'skipped';
+      continue;
+    }
+    r.status = 'running';
+    render();
+    state.files = [r.file];
+    state.file = r.file;
+    await analyzeCurrent();
+    const failed = !$('error').hidden || !state.questions.length;
+    if (failed) {
+      r.status = 'failed';
+      const title = $('error').querySelector('strong');
+      const message = $('error').querySelector('span');
+      r.note = $('error').hidden ? '没有切出题目' : `${title ? title.textContent : ''}：${message ? message.textContent : ''}`.slice(0, 80);
+      if (state.abort === null && /已取消/.test($('warning').textContent)) state.queueStop = true;
+    } else {
+      clearTimeout(bankTimer);
+      await saveBankNow();
+      const marks = state.questions.reduce((sum, q) => sum + (q.marks || 0), 0);
+      r.status = 'done';
+      r.note = `${state.questions.length} 题 ${marks} 分${state.meta.cover_check ? `（${state.meta.cover_check}）` : ''}`;
+    }
+    render();
+  }
+  render();
+  state.renderQueue = null;
+  state.queue = [];
+  state.files = [];
+  state.file = null;
+  $('drop').classList.remove('has-file');
+  $('dropText').textContent = DROP_HINT;
+  updateButton();
+}
+
+async function analyzeCurrent() {
   clearAlerts();
   const apiKey = $('apiKey').value.trim();
   const model = $('model').value.trim().replace(/^models\//, '');
@@ -8080,6 +8346,7 @@ function exportRows(embed = true) {
     sub_parts: q.sub_parts,
     figures: exportFigures(q, embed),
     ...(q.snapshot ? (embed ? { snapshot: q.snapshot } : { snapshot_file: `snapshots/${figureFile({ ...q, figures: [{ image: q.snapshot }] }, 0)}` }) : {}),
+    heading_box: q.heading_box || null,
     marks: q.marks,
     topic: q.topic,
     topic_fit: q.topic_fit,
@@ -8231,7 +8498,11 @@ function init() {
   $('srcTitle').addEventListener('change', (e) => editPaper('paper_title', e.target.value.trim()));
   $('srcType').addEventListener('change', (e) => editPaper('paper_type', e.target.value.trim()));
   $('srcYear').addEventListener('change', (e) => editPaper('year', e.target.value ? Number(e.target.value) : null));
-  $('cancel').addEventListener('click', () => { if (state.abort) state.abort.abort(); });
+  $('cancel').addEventListener('click', () => {
+    state.queueStop = true;
+    if (state.renderQueue) state.renderQueue();
+    if (state.abort) state.abort.abort();
+  });
   $('priceIn').addEventListener('input', renderCost);
   $('priceOut').addEventListener('input', renderCost);
   $('exportJson').addEventListener('click', exportJson);
@@ -8256,7 +8527,7 @@ function init() {
   $('pNone').addEventListener('click', () => document.querySelectorAll('#pTopics input').forEach((box) => { box.checked = false; }));
   $('pBuild').addEventListener('click', () => buildPaper(false));
   $('pAgain').addEventListener('click', () => buildPaper(true));
-  $('pPrint').addEventListener('click', printPaper);
+  $('pPrint').addEventListener('click', () => { printPaper().catch((e) => showAlert($('paperWarn'), '打印失败', String(e))); });
   $('pExport').addEventListener('click', exportPaperList);
   initAiUi();
   initVariantUi();

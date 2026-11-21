@@ -93,6 +93,11 @@
     if (list.length !== item.total[0] || marks !== item.total[1]) failures.push(`总数：${list.length} 题 ${marks} 分，应为 ${item.total.join(' 题 ')} 分`);
     // 切题截图：PDF 的每道题都要有。Word 没有页面，继续用文字。
     if (item.file.endsWith('.pdf') && list.some((q) => !q.snapshot)) failures.push('有题没有切题截图');
+    // VCAA 试卷的题号行都要记下位置，组卷时才能换成新题号。校内卷的 “Part A | 标题” 不换。
+    if (/^20\d\d/.test(item.file)) {
+      const missing = list.filter((q) => !q.heading_box).map((q) => `${(q.section || '').slice(-1)}${q.question_number}`);
+      if (missing.length) failures.push(`没有记下题号位置：${missing.join('、')}`);
+    }
     if (item.flagged !== undefined && list.filter((q) => q.math_problems.length).length !== item.flagged) failures.push('待核对题数变了');
     if (item.scoredB !== undefined) {
       const count = list.filter((q) => (q.section || '').endsWith('B')).flatMap((q) => q.sub_parts.filter((p) => p.marks)).length;
