@@ -1,157 +1,132 @@
 # 迁移到 Wix 指南
 
-把本地 demo 迁移到 Wix 的步骤。代码在 [`wix/`](wix/) 文件夹里。
+把本地版装进你们的 Wix 网站：老师登录网站后打开“题库”页，功能和本地版一样（切题、分类、审核、调整裁图、组卷、AI 出题），
+区别是题库存在网站后台、所有老师共用，Gemini Key 只在网站后台。代码在 [`wix/`](wix/) 文件夹。
 
-> **状态：这些代码还没有在真实 Wix 站点上运行过。** 我们只做过语法检查。API 用法已对照 Velo 官方文档核对，未核实的部分列在[第 7 节](#7-尚未核实的内容)。
+> **状态：** 网站版的全部流程在本地的模拟 Wix 环境里测过（[`tests/wix-mock/`](tests/wix-mock/)，用的是同一份后端代码），
+> **还没有在真实 Wix 网站上运行过**。第 7 节列出只能在真实网站上确认的地方，上线前请按第 6 节逐项验证。
 
-## 1. 先读：14 秒限制
-
-Wix 的 web module 和 HTTP function 单次请求最多运行 **14 秒**，免费站和付费站相同，且[不能提高](https://support.wix.com/en/article/velo-about-backend-quotas)。超时后前端收到 504。而 Gemini 分析一份完整试卷通常超过 14 秒。
-
-所以“前端调用后端、等待 Gemini 返回”这条直线流程走不通，这里改成任务 + 轮询：
+## 1. 怎么运作
 
 ```text
-Dashboard 页面                 后端 gemini.web.js              CMS / Gemini
-────────────────────────────────────────────────────────────────────────
-uploadFiles() ───────────────────────────────────────────▶ Media Manager
-createJob(fileUrl) ─────────▶ 插入任务 status=running ────▶ ClassifyJobs
-runJob(jobId)（不等待）──────▶ 下载 PDF，调用 Gemini ─────▶ Gemini
-  14 秒后前端收到 504（已忽略）   继续运行（见下方风险）
-                               写入 status=done + result ─▶ ClassifyJobs
-getJob(jobId) 每 3 秒轮询 ◀─── 读取任务状态
-显示结果，管理员审核
-saveQuestions() ────────────▶ bulkInsert ─────────────────▶ Questions
+老师的浏览器                                   Wix 网站
+┌────────────────────────────┐   postMessage   ┌──────────────────────┐   web method   ┌─────────────────────────┐
+│ HTML 组件 #vceApp            │ ◀────────────▶ │ 页面代码 vce-app.js     │ ─────────────▶ │ 后端 vce.web.js          │
+│  加载器 → index.html（网站版） │                │  public/vceHost.js 转发 │                │  vceCore.js：检查老师角色  │
+│  切题、分类、裁图都在这里算      │                └──────────────────────┘                │  读写集合、媒体库、调 Gemini │
+└────────────────────────────┘                                                        └─────────────────────────┘
+          │  图片和原卷直接上传到媒体库（失败时经后端转存）                                   Secrets Manager：GEMINI_API_KEY
 ```
 
-**风险：** 官方文档的原话是超时后代码“might still execute”（可能继续执行），并不保证。这是这条方案的关键不确定点，请在做界面之前先验证：
+- **计算都在浏览器里**：PDF 渲染、OCR、切题、分类和本地版一样在老师的浏览器里完成，不占网站后端，也不受 14 秒限制。
+- **题库在网站后台**：五张表对应五个集合（见第 3 节），图片和原卷存在媒体库。表结构见 [docs/DATA_SCHEMA.md](docs/DATA_SCHEMA.md)。
+- **Key 只在后端**：页面里没有 Key。AI 请求交给后端，后端从 Secrets Manager 读 Key 调用 Gemini。
+- **14 秒限制**：Wix 后端单次请求最多 14 秒，AI 出题常常更久，所以 AI 调用分三步：建任务 → 后台调用（页面不等）→ 每 2.5 秒取一次结果。
+  官方说超时后后端代码“可能”继续运行，这是第 6 节第一项要验证的。
+- **只有老师能用**：每个后端方法都会检查登录会员的角色，只有 `Admin`（站长和协作者）和 `Teacher` 能用。
 
-1. 只搭好第 3、4 节的后端和最简单的上传按钮。
-2. 用一份 15 页以上的完整真题跑几次。
-3. 看 `ClassifyJobs` 里的 `status` 能否稳定变成 `done`。
+## 2. 准备
 
-如果任务一直停在 `running`，说明后端被终止了，请改用第 8 节的备用方案。
+1. 网站打开 **Dev Mode**（Velo）。
+2. **会员角色**：在会员设置里新建角色 `Teacher`，给老师账号加上这个角色。名字不同的话改 `wix/backend/vceCore.js` 里的 `ALLOWED_ROLES`。
+3. **Gemini Key**：在 Google AI Studio 新建一个只给网站用的 Key（不要用本地测试的 Key），开通付费（免费层提交的内容可能被 Google 用于改进产品）。
+   打开 **Secrets Manager**，添加密钥，名称 `GEMINI_API_KEY`。
+4. **托管 index.html**：页面代码要从一个 https 地址取 index.html。仓库是公开的，可以在 GitHub 仓库的 Settings → Pages 里选 `main` 分支，
+   地址就是 `https://ryanwang688.github.io/vce-exam-classifier/index.html`。index.html 里没有 Key 和题库数据，可以公开。
 
-> **题目配图、Word 和图片上传尚未迁移。** 本地 demo 已支持，但 `wix/` 的代码目前只处理 PDF 的文字和分类。建议用真实试卷验证效果后再迁移。Word 解析依赖浏览器的 DOMParser，迁移时要放在 HTML iframe 里运行。迁移时，页面渲染和裁剪仍要在浏览器完成（Dashboard 里用 HTML iframe 运行 PDF.js），截图上传到 Media Manager，`Questions` 再加一个图片字段。
+## 3. 集合
 
-## 2. 与原方案不同的地方
+在 CMS 新建下面 6 个集合。**权限全部设为“仅管理员”**（读、写都是），后端用 `suppressAuth` 代为读写，页面不直接访问集合。
 
-| 项目 | 原方案 | 实际做法 | 原因 |
-|---|---|---|---|
-| 调用方式 | 等待 Gemini 返回 | 任务 + 轮询 | 14 秒上限 |
-| 读取 Secret | `wix-secrets-backend` | `wix-secrets-backend.v2` 的 `getSecretValue` | 旧方法 `getSecret` 官方已标注弃用 |
-| CMS 集合 | 只有 `Questions` | 新增 `ClassifyJobs` | 用来存放任务状态和结果 |
-| 小问 | - | 合并进 `text` | `Questions` 只有一个文本字段 |
+| 集合 | 用途 |
+|---|---|
+| `VceQuestions` | 题目（含 AI 出的题） |
+| `VcePapers` | 试卷 |
+| `VceAssets` | 图片和原卷的文件记录（文件本身在媒体库） |
+| `VceSpecs` | 出题规范的各个版本 |
+| `VceFeedback` | 老师审核 AI 题的意见 |
+| `VceAiJobs` | AI 调用任务（取完结果自动删除） |
 
-## 3. 准备工作
-
-1. 在站点打开 **Dev Mode**（Velo）。
-2. 在 Google AI Studio 新建一个**只给 Wix 用**的 API Key，不要沿用本地测试的 Key。
-3. 打开 **Secrets Manager**，添加密钥，名称填 `GEMINI_API_KEY`。
-4. 正式使用前，给这个 Key 所属项目开通付费。免费层提交的内容可能被 Google 用于改进产品。
-
-## 4. CMS 集合
-
-两个集合的权限都设为**仅管理员**（Admin）。后端已用 `suppressAuth` 写入，前端不会直接访问集合。
-
-**Questions**
-
-| 字段 | Field Key | 类型 |
-|---|---|---|
-| Subject | `subject` | Text |
-| Unit | `unit` | Text |
-| Topic | `topic` | Text |
-| Question Type | `questionType` | Text |
-| Difficulty | `difficulty` | Text |
-| Text | `text` | Text |
-| Confirmed | `confirmed` | Boolean |
-| Source ID | `sourceId` | Text（题目唯一 ID，用于去重） |
-| Source | `source` | Text（如 `2024 VCAA Physics Exam Section B Q3`） |
-| Publisher | `publisher` | Text |
-| Paper Title | `paperTitle` | Text |
-| Paper Type | `paperType` | Text |
-| Year | `year` | Number |
-| Question Number | `questionNumber` | Text |
-| Section | `section` | Text |
-| Source Page | `sourcePage` | Number |
-| Adapted From | `adaptedFrom` | Text（题目改编自哪份试卷，如 `2022 SM Exam 1`） |
-
-`sourceId` 由出版方、年份、试卷名、类型、Section 和题号生成，同一道题重复导入时 ID 相同。`bulkInsert` 不会自动按它去重，正式入库前要先查询已有的 `sourceId`，或者把它的值同时写入 `_id`。
-
-本地页面可以修改来源信息；Wix 页面目前直接使用 AI 识别的值，迁移时建议加上同样的输入框。
-
-**ClassifyJobs**
+前五个集合都有这些字段，`json` 里是整条记录，其余字段只是方便在 CMS 里查看和筛选：
 
 | 字段 | Field Key | 类型 |
 |---|---|---|
-| File URL | `fileUrl` | Text |
-| File Name | `fileName` | Text |
-| Status | `status` | Text（`running` / `done` / `failed`） |
-| Result | `result` | Text（JSON，整条记录上限约 500KB） |
-| Error | `error` | Text |
+| Record Key | `recordKey` | Text |
+| Updated At | `updatedAt` | Text |
+| JSON | `json` | Text |
+| Label | `label` | Text（VceAssets 没有） |
 
-## 5. 放置代码
+另外：
+
+- `VceQuestions`：`paperId`、`subject`、`topic`、`questionType`、`difficulty`、`status`（Text），`generated`（Boolean）
+- `VcePapers`：`subject`、`year`（Text）
+- `VceAssets`：`kind`、`owner`、`mime`、`fileUrl`（Text），`size`（Number）
+- `VceAiJobs`：`status`、`createdBy`、`createdAt`、`finishedAt`、`error`、`result`（Text），`httpStatus`（Number）
+
+Wix 写入时字段不存在会自动加上，但先建好类型更稳妥。单条记录上限约 500KB，后端在 450KB 处就会拒绝并提示（模拟环境里实测 2025MM1，每道题和整份试卷的记录都在 5KB 以内）。
+
+## 4. 放置代码
 
 | 本仓库文件 | 放到 Wix 的位置 |
 |---|---|
-| `wix/backend/gemini.web.js` | Backend → `gemini.web.js` |
-| `wix/backend/taxonomy.js` | Backend → `taxonomy.js` |
-| `wix/backend/prompt.js` | Backend → `prompt.js` |
-| `wix/pages/exam-dashboard.js` | Dashboard 页面的 Page Code |
+| `wix/backend/vceCore.js` | Backend → `vceCore.js` |
+| `wix/backend/vce.web.js` | Backend → `vce.web.js` |
+| `wix/public/vceHost.js` | Public → `vceHost.js` |
+| `wix/pages/vce-app.js` | “题库”页面的 Page Code |
+| `wix/html/loader.html` | “题库”页面上 HTML 组件的代码 |
 
-所有 web method 都是 `Permissions.Admin`，只有站点所有者和协作者能调用。不要放宽这个权限，否则访客可以消耗你的 Gemini 额度。
+“题库”页面：
 
-修改 `index.html` 的分类表或提示词后，请同步 `taxonomy.js` 和 `prompt.js`。
+1. 新建页面，**设为仅会员可见**。
+2. 放一个 **Embed HTML**（HTML 组件），ID 改成 `vceApp`，选“代码”方式，粘贴 `wix/html/loader.html`，把里面的 `APP_URL` 改成第 2 步的地址，`SITE_ORIGIN` 改成你的网站地址（如 `https://www.xxx.com`）。
+3. 把组件拉大到整页宽、足够高（建议高度 1200px 以上）。
+4. Page Code 粘贴 `wix/pages/vce-app.js`，发布。
 
-## 6. Dashboard 页面元素
+以后更新功能：本地改好 index.html 推送到 GitHub，网站页面刷新就是新版本，不用改 Wix。后端和集合只有改了 `wix/` 里的文件时才要同步。
 
-在 Wix 编辑器里添加以下元素，并设置对应的 ID：
+## 5. 把本地题库搬上去
 
-| 元素 | ID | 说明 |
+1. 本地版：题库面板 →“导出完整题库（ZIP）”。
+2. 网站版：老师登录，题库面板 →“导入题库”，选这个 ZIP。图片和原卷会传到媒体库，记录写进集合。同一条记录以修改时间较新的为准，可以重复导入。
+
+## 6. 上线前验证（按顺序）
+
+1. **14 秒后后端是否继续运行**：AI 出一道题（或用 AI 模式分析一份试卷）。如果页面一直等到“AI 没有返回结果”，并且 `VceAiJobs` 里任务一直是 `running`，说明后端被停掉了，改用第 8 节的备用方案。
+2. **权限**：用没有 `Teacher` 角色的会员打开，页面顶部应显示“没有权限”，分析按钮不能点。
+3. **上传**：分析一份试卷，媒体库的 `vce-bank` 文件夹里应出现裁图、配图和原卷；原卷应是私密文件。
+4. **重新打开**：刷新页面，题库面板里“打开”刚才的试卷，裁图和原卷都能显示，“调整裁图”能用。
+5. **导出导入**：导出完整题库，确认 ZIP 里有图片和原卷。
+6. **另一位老师**：换一个老师账号打开，能看到同一份题库。
+
+## 7. 只能在真实网站上确认的地方
+
+| 项目 | 为什么不确定 | 如果不行 |
 |---|---|---|
-| Upload Button | `uploadPdf` | 文件类型 Document，单文件 |
-| Button | `analyzeBtn` | 开始分析 |
-| Button | `saveBtn` | 保存到 CMS |
-| Text | `statusText` | 状态和错误提示 |
-| Text | `paperText` | 试卷信息 |
-| Repeater | `questionRepeater` | 题目列表 |
+| 超时后后端是否继续运行 | 官方只说“可能” | 第 8 节备用方案 |
+| 浏览器能否直接上传到 `getUploadUrl` 给的地址 | 官方示例是外部程序上传，没说浏览器跨域是否允许；上传返回的格式文档里前后不一致 | 已自动改为经后端转存（单个文件 4MB 以内），大于 4MB 的原卷会传不上去 |
+| 浏览器能否直接下载 `getDownloadUrl` 给的地址 | 跨域是否允许没有文档 | 已自动改为经后端读取 |
+| web method 的参数和返回值大小上限 | 没有查到文档 | 经后端转存、读取的文件过大时会失败，需要拆分 |
+| HTML 组件里 `location.ancestorOrigins` 和消息来源 | Wix 是否多套一层 iframe 没有文档 | 已在加载器里写明网站地址作为备用判断 |
+| `mediaManager.getFileInfo`、`moveFilesToTrash` 的用法 | 按 API 名称使用，没有逐条核对文档 | 改动在 `vceCore.js` 的 `assetConfirm` 和 `trash` |
+| `wixData` 查询的 `skip` 上限 | 题目很多时（上万）分页可能受限 | 改为按 `next()` 翻页 |
 
-Repeater 的每一项里：
+## 8. 备用方案（第 6 节第 1 项失败时）
 
-| 元素 | ID |
-|---|---|
-| Container / Box | `card`（低置信度时变色） |
-| Text | `qNumber`、`qText`、`qConfidence` |
-| Dropdown | `topicDropdown`、`typeDropdown`、`difficultyDropdown` |
-| Checkbox | `confirmedCheckbox` |
+把调用 Gemini 的那一步移出 Wix：部署一个小服务（如 Google Cloud Run）保管 Key、调用 Gemini，完成后调用 Wix 的 HTTP function 写回 `VceAiJobs`。
+`aiRun` 只把任务 ID 和请求转给这个服务。页面和轮询代码不用改，代价是多维护一个服务，Key 也不再只存在 Wix。
 
-Wix 的 Text 元素不会渲染 LaTeX，`qText` 里会显示公式源码。如果需要渲染，可以用 Custom Element 或 HTML iframe 加载 KaTeX。
+## 9. 本地测试网站版
 
-## 7. 尚未核实的内容
-
-以下几点我查不到官方依据，或者只能在真实站点确认：
-
-- **超时后后端是否继续执行：** 第 1 节的风险，优先验证。
-- **`wix-fetch` 的 `response.arrayBuffer()`：** 没有查到文档。如果报错，改用 `await response.buffer()`。
-- **Upload Button 的 PDF 大小上限：** 相关文档未能读取，请用接近 20MB 的文件测一次。
-- **定时任务（jobs.config）的运行时长：** 相关页面已失效，所以没有依赖它。
-- **`getDownloadUrl` 对 `wix:document://` 的支持：** 官方示例是图片地址，方法说明里没有排除文档。
-
-## 8. 备用方案
-
-如果第 1 节的验证失败，把耗时调用移出 Wix：
-
-1. 部署一个小型外部服务（例如 Google Cloud Run），由它保管 Gemini Key 并调用 Gemini。
-2. `runJob` 只把 `jobId` 和 PDF 下载地址发给这个服务，然后立刻返回。
-3. 服务完成后，调用 Wix 的 HTTP function 写回 `ClassifyJobs`，请求需带共享密钥验证。
-
-前端的轮询代码不用改。代价是多维护一个服务，Key 也不再只存放在 Wix。
+不用真实网站也能测：用本地服务器打开 `/tests/wix-mock/host.html`，它用 `wix/` 里的同一份后端代码，把 Wix 的数据库、媒体库、密钥、角色、Gemini 换成内存里的模拟版。
+在控制台加载 `/tests/wix-mock/wix-check.js` 会自动跑一遍：权限、入库、重新打开、调整裁图、上传下载失败时的备用路径、AI 调用（含超时和额度用完）、导出导入、删除。
 
 ## 参考文档
 
-- [Velo 后端配额](https://support.wix.com/en/article/velo-about-backend-quotas)
-- [Velo 数据配额](https://support.wix.com/en/article/velo-about-data-quotas)
-- [Web Modules](https://dev.wix.com/docs/develop-websites/articles/coding-with-velo/backend-code/web-modules/about-web-modules)
-- [getSecretValue](https://dev.wix.com/docs/velo/apis/wix-secrets-backend-v2/secrets/get-secret-value)
+- [Velo 后端配额（14 秒）](https://support.wix.com/en/article/velo-about-backend-quotas)
+- [数据上限：单条 500KB、批量 4MB / 1000 条](https://dev.wix.com/docs/develop-websites/articles/coding-with-velo/limits-and-optimization/data-features)
+- [查询 limit 最多 1000](https://dev.wix.com/docs/velo/apis/wix-data/wix-data-query/limit)
+- [HTML 组件和页面代码之间的消息](https://dev.wix.com/docs/velo/velo-only-apis/$w/html-component/messaging-between-a-site-page-and-an-html-element)
+- [getUploadUrl](https://dev.wix.com/docs/velo/apis/wix-media-backend/media-manager/get-upload-url)
 - [getDownloadUrl](https://dev.wix.com/docs/velo/apis/wix-media-backend/media-manager/get-download-url)
-- [bulkInsert](https://dev.wix.com/docs/velo/apis/wix-data/bulk-insert)
-- [uploadFiles](https://dev.wix.com/docs/velo/velo-only-apis/$w/upload-button/upload-files)
+- [currentMember.getRoles](https://dev.wix.com/docs/velo/apis/wix-members-backend/current-member/get-roles)
+- [getSecretValue](https://dev.wix.com/docs/velo/apis/wix-secrets-backend-v2/secrets/get-secret-value)

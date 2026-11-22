@@ -262,6 +262,8 @@
   .crop-tools { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
   .tag.edited-crop { background: #e7f3f3; color: var(--accent); }
   .bank-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .wix-mode .local-only { display: none; }
+  .wix-status { background: #e7f3f3; }
   #bankPapers h4 { margin: 14px 0 6px; }
 
   [hidden] { display: none !important; }
@@ -278,7 +280,8 @@
   <h1>VCE 试卷自动分类</h1>
   <span>AI 分类效果测试 Demo</span>
 </header>
-<div class="notice">
+<div id="wixStatus" class="notice wix-status" hidden></div>
+<div class="notice local-only">
   <strong>仅限本地测试：</strong>这里的 API Key 保存在当前浏览器，会被页面代码直接读取。正式版的 Key 必须放在 <strong>Wix 后端的 Secrets Manager</strong> 里，绝不能出现在前端。<br>
   <strong>隐私提醒：</strong>Gemini 免费层提交的内容可能被 Google 用于改进产品，请勿上传学生信息或未公开的校内试卷。
 </div>
@@ -496,7 +499,7 @@
       <summary id="bankTitle"></summary>
       <div id="bankBody"></div>
       <div id="bankPapers"></div>
-      <p class="hint">题库存在这台电脑的浏览器里，清除浏览器数据会一起删掉。请定期“导出完整题库”备份；换电脑或迁到网站时用“导入题库”。</p>
+      <p class="hint" id="bankHint">题库存在这台电脑的浏览器里，清除浏览器数据会一起删掉。请定期“导出完整题库”备份；换电脑或迁到网站时用“导入题库”。</p>
       <div class="row" style="margin-top:10px">
         <button id="bankJson" type="button">导出完整题库（ZIP）</button>
         <button id="bankImport" type="button">导入题库</button>
@@ -1127,14 +1130,16 @@ const STOP_MESSAGES = {
 async function sendJson(url, headers, body, signal, networkMessage) {
   let response;
   try {
-    response = await fetch(url, {
+    // 网站版：本页没有 Key，Gemini 请求一律交给网站后台。
+    if (WIX_MODE && url.startsWith(API_BASE)) response = await wixGemini(url, body, signal);
+    else response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(body),
       signal,
     });
   } catch (e) {
-    if (e.name === 'AbortError') throw e;
+    if (e.name === 'AbortError' || e instanceof UserError) throw e;
     throw new UserError('网络请求失败', networkMessage, String(e));
   }
 
@@ -1156,11 +1161,11 @@ const providerStore = (base) => ($('provider').value === 'gemini' ? base : `${ba
 
 function applyProvider() {
   const provider = currentProvider();
-  $('keyField').hidden = !provider.needsKey;
+  $('keyField').hidden = !provider.needsKey || WIX_MODE; // 网站版不在页面上填 Key。
   $('model').closest('label').hidden = Boolean(provider.rules);
   $('keyLabel').textContent = provider.label;
-  $('providerHint').textContent = provider.hint;
-  $('apiKey').value = provider.needsKey ? storageGet(providerStore(STORE.key)) || '' : '';
+  $('providerHint').textContent = WIX_MODE && provider.needsKey ? '网站版：Gemini Key 存在网站后台的 Secrets Manager，由后台代为调用，会产生费用。' : provider.hint;
+  $('apiKey').value = WIX_MODE ? WIX_KEY : (provider.needsKey ? storageGet(providerStore(STORE.key)) || '' : '');
   $('model').value = storageGet(providerStore(STORE.model)) || provider.model;
   const list = $('modelList');
   list.textContent = '';
@@ -6019,6 +6024,7 @@ const GEN_REASONS = ['答案错', '太简单', '太难', '超纲', '用语不像
 const aiState = { running: false, abort: null, rejected: [], usage: { promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 } };
 
 function aiKey() {
+  if (WIX_MODE) return WIX_KEY; // 网站版的 Key 在后端，请求由后台代发。
   return storageGet(STORE.key) || '';
 }
 
@@ -7870,7 +7876,7 @@ const BANK_DB = 'vceQuestionBank';
 const BANK_DB_VERSION = 3;          // IndexedDB 的版本。2 及以前：图片直接放在题目记录里。
 const RECORD_VERSION = 2;           // 记录格式的版本，写在每条记录的 schema_version 里。
 const BANK_TABLES = { questions: 'source_id', papers: 'paper_id', assets: 'id', specs: 'version', feedback: 'id' };
-const BANK_USER = 'local';          // 操作人。Wix 里换成会员 ID。
+let BANK_USER = 'local';            // 操作人。网站版连上后换成会员 ID（后端也会再写一次，以后端为准）。
 const BANK_FORMAT = 'vce-question-bank';
 
 function dataUrlToBlob(url) {
@@ -7991,6 +7997,7 @@ function indexedDbDriver() {
     name: 'IndexedDB',
     getAll: (table) => read(table, (store) => store.getAll()),
     get: (table, id) => read(table, (store) => store.get(id)),
+    getMany: (table, ids) => Promise.all(ids.map((id) => read(table, (store) => store.get(id)))),
     async write(ops) {
       const db = await open();
       const tables = [...new Set(ops.map((op) => op.table))];
@@ -8020,6 +8027,7 @@ function memoryDriver() {
     tables,
     getAll: async (table) => [...tables[table].values()].map(copy),
     get: async (table, id) => copy(tables[table].get(id)),
+    getMany: async (table, ids) => ids.map((id) => copy(tables[table].get(id))),
     async write(ops) {
       ops.forEach(({ table, put = [], remove = [], clear = false }) => {
         if (clear) tables[table].clear();
@@ -8040,6 +8048,7 @@ const bank = {
     assetUrls.clear();
   },
   async write(ops) {
+    if (ops.some((op) => op.table === 'assets')) this.assetRecords = null; // 文件变了，预读的记录作废。
     await this.driver.write(ops.filter((op) => op.clear || (op.put || []).length || (op.remove || []).length));
     ops.filter((op) => op.table === 'assets').forEach((op) => [...(op.put || []).map((a) => a.id), ...(op.remove || [])].forEach((id) => {
       if (assetUrls.has(id)) URL.revokeObjectURL(assetUrls.get(id));
@@ -8057,6 +8066,11 @@ const bank = {
   },
   listQuestions() { return this.driver.getAll('questions'); },
   getQuestion(id) { return this.driver.get('questions', id); },
+  // 一次读多条：网站版每次读取都是一次后端调用，逐条读会很慢。
+  async getQuestions(ids) {
+    if (!ids.length) return [];
+    return this.driver.getMany ? this.driver.getMany('questions', ids) : Promise.all(ids.map((id) => this.getQuestion(id)));
+  },
   async putQuestion(record) {
     this.stamp(record, await this.getQuestion(record.source_id));
     await this.write([{ table: 'questions', put: [record] }]);
@@ -8067,7 +8081,7 @@ const bank = {
   async savePaper(paper, questions, assets) {
     const old = await this.getPaper(paper.paper_id);
     const oldIds = old ? old.question_ids : [];
-    const oldRecords = (await Promise.all(oldIds.map((id) => this.getQuestion(id)))).filter(Boolean);
+    const oldRecords = (await this.getQuestions(oldIds)).filter(Boolean);
     const byId = new Map(oldRecords.map((record) => [record.source_id, record]));
     const newIds = new Set(questions.map((q) => q.source_id));
     questions.forEach((q) => this.stamp(q, byId.get(q.source_id)));
@@ -8091,7 +8105,7 @@ const bank = {
   async deletePaper(paperId) {
     const paper = await this.getPaper(paperId);
     if (!paper) return;
-    const records = (await Promise.all(paper.question_ids.map((id) => this.getQuestion(id)))).filter(Boolean);
+    const records = (await this.getQuestions(paper.question_ids)).filter(Boolean);
     const assets = [...records.flatMap((q) => [q.snapshot_asset, ...(q.figures || []).map((f) => f.image_asset)]), ...paper.source_assets].filter(Boolean);
     await this.write([
       { table: 'questions', remove: paper.question_ids },
@@ -8099,9 +8113,20 @@ const bank = {
       { table: 'assets', remove: assets },
     ]);
   },
+  // 本地驱动的文件内容就在记录里；网站版记录里只有媒体库的文件地址，要由驱动去下载。
+  // 一次读出多个文件的记录备用（打开试卷时用），之后 assetBlob 不用再逐个查。
+  async preloadAssets(ids) {
+    const list = ids.filter(Boolean);
+    if (!list.length || !this.driver.getMany) return;
+    const records = await this.driver.getMany('assets', list);
+    this.assetRecords = new Map(records.filter(Boolean).map((record) => [record.id, record]));
+  },
   async assetBlob(id) {
-    const asset = id ? await this.driver.get('assets', id) : null;
-    return asset ? asset.blob : null;
+    const cached = this.assetRecords && this.assetRecords.get(id);
+    const asset = cached || (id ? await this.driver.get('assets', id) : null);
+    if (!asset) return null;
+    if (asset.blob) return asset.blob;
+    return this.driver.readAsset ? this.driver.readAsset(asset) : null;
   },
   async assetUrl(id) {
     if (!id) return null;
@@ -8126,6 +8151,213 @@ const bank = {
   clearAll() { return this.write(Object.keys(BANK_TABLES).map((table) => ({ table, clear: true }))); },
 };
 bank.use(indexedDbDriver());
+
+/* ---------- 网站版（Wix）----------
+ * 页面放在 Wix 的 HTML 组件里运行（加载器见 wix/html/loader.html）。和 Wix 页面代码之间只用 postMessage 通信：
+ *   本页 → 页面代码：{ source: 'vce-app', type: 'ready' | 'call', id, method, args }
+ *   页面代码 → 本页：{ source: 'vce-host', type: 'init' | 'reply', id, ok, result, error }
+ * 页面代码把调用转给后端（wix/backend/vce.web.js）。题库存在 Wix 集合里，图片和原卷存在媒体库，
+ * Gemini Key 只在后端的 Secrets Manager 里，本页拿不到。
+ */
+const WIX_MODE = window.__VCE_HOST === 'wix' || new URLSearchParams(location.search).get('host') === 'wix';
+const WIX_KEY = 'wix-backend';            // 网站版没有 Key，用这个占位让“有没有 Key”的检查通过；请求都转给后端。
+const WIX_CALL_TIMEOUT_MS = 60 * 1000;    // 单次后端调用最多等多久（后端本身 14 秒就会超时）。
+const WIX_AI_TIMEOUT_MS = 5 * 60 * 1000;  // AI 任务最多等多久。
+const WIX_AI_POLL_MS = 2500;
+const WIX_INLINE_LIMIT = 200 * 1024;      // 发给 AI 的单个文件超过这么大，先传到媒体库再让后端去取。
+const WIX_BASE64_LIMIT = 4 * 1024 * 1024; // 直接上传失败时，经后端转存的文件上限。
+const WIX_ASSET_PAGE = { questions: 300, papers: 40, assets: 1000, specs: 200, feedback: 1000 };
+
+const wixHost = {
+  seq: 0,
+  pending: new Map(),
+  user: null,
+  targetOrigin() {
+    // 加载器会写明网站地址；没写时用浏览器提供的上层页面地址。
+    if (window.__VCE_PARENT_ORIGIN) return window.__VCE_PARENT_ORIGIN;
+    if (location.ancestorOrigins && location.ancestorOrigins.length) return location.ancestorOrigins[location.ancestorOrigins.length - 1];
+    return '*';
+  },
+  send(message) {
+    window.parent.postMessage({ source: 'vce-app', ...message }, this.targetOrigin());
+  },
+  listen() {
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+      // 只认页面代码发来的消息：来自上层窗口，或者来自加载器写明的网站地址。
+      const fromSite = window.__VCE_PARENT_ORIGIN && event.origin === window.__VCE_PARENT_ORIGIN;
+      if ((event.source !== window.parent && !fromSite) || !data || data.source !== 'vce-host') return;
+      if (data.type === 'init') {
+        this.user = data.user || null;
+        if (this.onInit) this.onInit(data);
+        return;
+      }
+      const waiting = this.pending.get(data.id);
+      if (!waiting) return;
+      this.pending.delete(data.id);
+      clearTimeout(waiting.timer);
+      if (data.ok) waiting.resolve(data.result);
+      else waiting.reject(new UserError('网站后台出错', data.error || '后台没有说明原因。'));
+    });
+  },
+  // 告诉页面代码“我准备好了”，等它回复登录信息。页面代码可能比本页晚就绪，所以每秒重发一次。
+  connect() {
+    this.listen();
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      this.onInit = (data) => { clearInterval(timer); resolve(data); };
+      const timer = setInterval(() => {
+        if (Date.now() - started > 20000) {
+          clearInterval(timer);
+          reject(new UserError('连不上网站', '20 秒内没有收到网站页面代码的回复。请确认页面代码已发布（wix/pages/vce-app.js）。'));
+          return;
+        }
+        this.send({ type: 'ready', protocol: 1 });
+      }, 1000);
+      this.send({ type: 'ready', protocol: 1 });
+    });
+  },
+  call(method, ...args) {
+    const id = ++this.seq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new UserError('网站后台没有响应', `${method} 超过 ${WIX_CALL_TIMEOUT_MS / 1000} 秒没有返回。`));
+      }, WIX_CALL_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      this.send({ type: 'call', id, method, args });
+    });
+  },
+};
+
+const blobToBase64 = async (blob) => (await readDataUrl(blob)).split(',')[1];
+
+// 文件传到 Wix 媒体库：先用后端给的上传地址直接上传；浏览器传不上去时，改为经后端转存（有大小上限）。
+async function wixUpload(asset) {
+  const meta = { id: asset.id, kind: asset.kind, mime: asset.mime, size: asset.size };
+  let info = null;
+  try {
+    // 直接上传因为网络或跨域失败过一次，这次打开页面期间小文件就不再试，省掉一来一回。
+    if (wixHost.directUploadBroken && asset.size <= WIX_BASE64_LIMIT) throw new Error('直接上传不可用');
+    const { uploadUrl, fileName } = await wixHost.call('assetUploadUrl', meta);
+    const form = new FormData();
+    form.append('file', asset.blob, fileName);
+    let response;
+    try {
+      response = await fetch(uploadUrl, { method: 'POST', body: form });
+    } catch (e) {
+      wixHost.directUploadBroken = true; // 网络层失败（多半是跨域限制）。
+      throw e;
+    }
+    if (!response.ok) throw new Error(`上传失败（${response.status}）`);
+    const body = await response.json();
+    const file = Array.isArray(body) ? body[0] : (body.file || body);
+    if (!file || !file.file_name) throw new Error('上传返回的内容看不懂');
+    info = await wixHost.call('assetConfirm', file.file_name);
+  } catch (e) {
+    if (asset.size > WIX_BASE64_LIMIT) {
+      throw new UserError('文件传不上去', `${asset.id} 有 ${(asset.size / 1048576).toFixed(1)} MB，直接上传失败（${e.message || e}），经后台转存最多 ${WIX_BASE64_LIMIT / 1048576} MB。`);
+    }
+    info = await wixHost.call('assetUploadBase64', meta, await blobToBase64(asset.blob));
+  }
+  return { id: asset.id, kind: asset.kind, owner: asset.owner, mime: asset.mime, size: asset.size, file_url: info.fileUrl, file_name: info.fileName || null };
+}
+
+function wixDriver() {
+  return {
+    name: 'Wix',
+    async getAll(table) {
+      const out = [];
+      for (let skip = 0; ; skip += WIX_ASSET_PAGE[table]) {
+        const page = await wixHost.call('bankGetAll', table, skip, WIX_ASSET_PAGE[table]);
+        out.push(...page.items);
+        if (!page.hasNext) return out;
+      }
+    },
+    get: (table, id) => wixHost.call('bankGet', table, id).then((record) => record || undefined),
+    async getMany(table, ids) {
+      const out = [];
+      for (let i = 0; i < ids.length; i += 200) out.push(...await wixHost.call('bankGetMany', table, ids.slice(i, i + 200)));
+      return out.map((record) => record || undefined);
+    },
+    async write(ops) {
+      const prepared = [];
+      for (const op of ops) {
+        if (op.table !== 'assets' || !(op.put || []).length) {
+          prepared.push(op);
+          continue;
+        }
+        const put = [];
+        for (const asset of op.put) put.push(asset.blob ? await wixUpload(asset) : asset);
+        prepared.push({ ...op, put });
+      }
+      await wixHost.call('bankWrite', prepared);
+    },
+    // 文件内容：先试浏览器直接下载，下载不了（跨域限制）再请后端转成 base64。
+    async readAsset(asset) {
+      if (!wixHost.directDownloadBroken) {
+        try {
+          const href = await wixHost.call('assetHref', asset.id);
+          const response = await fetch(href);
+          if (response.ok) return await response.blob();
+        } catch (e) {
+          if (e && e.name === 'TypeError') wixHost.directDownloadBroken = true; // 网络层失败（多半是跨域限制），这次打开期间不再试。
+        }
+      }
+      const base64 = await wixHost.call('assetBase64', asset.id);
+      return base64 ? dataUrlToBlob(`data:${asset.mime || 'application/octet-stream'};base64,${base64}`) : null;
+    },
+  };
+}
+
+// 网站版调用 Gemini：后端建任务、在后台调用（不受 14 秒限制的影响）、本页轮询结果。
+// 大文件（整份 PDF、大图）先传到媒体库，请求里只写文件地址，由后端取回再交给 Gemini。
+async function wixGemini(url, body, signal) {
+  const model = decodeURIComponent(url.slice(API_BASE.length).split(':')[0]);
+  const temps = [];
+  const contents = [];
+  for (const content of body.contents || []) {
+    const parts = [];
+    for (const part of content.parts || []) {
+      if (part.inlineData && part.inlineData.data.length > WIX_INLINE_LIMIT) {
+        const blob = dataUrlToBlob(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
+        const file = await wixUpload(makeAsset(`temp-${Date.now()}-${temps.length}`, 'temp', null, blob));
+        temps.push(file.file_url);
+        parts.push({ wixMedia: { fileUrl: file.file_url, mimeType: part.inlineData.mimeType } });
+      } else {
+        parts.push(part);
+      }
+    }
+    contents.push({ ...content, parts });
+  }
+  const { jobId } = await wixHost.call('aiStart');
+  // 不等这次调用返回：超过 14 秒页面代码会收到超时错误，这是预期的，结果从 aiPoll 取。
+  wixHost.call('aiRun', jobId, model, { ...body, contents }, temps).catch(() => {});
+  const deadline = Date.now() + WIX_AI_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (signal && signal.aborted) throw new DOMException('aborted', 'AbortError');
+    await sleep(WIX_AI_POLL_MS, signal || new AbortController().signal);
+    const job = await wixHost.call('aiPoll', jobId);
+    if (job.status === 'done') return new Response(job.result, { status: job.httpStatus || 200, headers: { 'content-type': 'application/json' } });
+    if (job.status === 'failed') throw new UserError('网站后台调用 AI 失败', job.error || '后台没有说明原因。');
+  }
+  throw new UserError('AI 没有返回结果', `等了 ${WIX_AI_TIMEOUT_MS / 60000} 分钟还没有结果。如果每次都这样，说明后台任务在 14 秒后被停掉了，请看 WIX_GUIDE.md 的备用方案。`);
+}
+
+// 网站版启动：连上页面代码、确认是老师账号、换成 Wix 驱动、调整界面。
+async function startWixMode() {
+  document.body.classList.add('wix-mode');
+  $('wixStatus').hidden = false;
+  $('wixStatus').textContent = '正在连接网站…';
+  const { user } = await wixHost.connect();
+  if (!user || !user.allowed) {
+    throw new UserError('没有权限', (user && user.error) || '请用老师账号登录网站后再打开这个页面。题库只对老师开放。');
+  }
+  BANK_USER = user.memberId || 'wix';
+  bank.use(wixDriver());
+  $('bankHint').textContent = '题库存在网站后台，所有老师共用。可以“导出完整题库”留一份备份；本地版导出的题库用“导入题库”搬上来。';
+  $('wixStatus').textContent = `网站版：已登录（${(user.roles || []).join('、') || '老师'}）。题库存在网站后台，AI 由网站后台调用，Key 不在页面里。`;
+}
 
 const bankRows = () => bank.listQuestions();
 
@@ -8194,9 +8426,10 @@ function currentPaperRecords() {
 async function carryOverTeacherWork() {
   if (!state.paper) return 0;
   let kept = 0;
-  for (const q of state.questions) {
-    let record = null;
-    try { record = await bank.getQuestion(sourceId(q)); } catch (e) { return kept; }
+  let records;
+  try { records = await bank.getQuestions(state.questions.map((q) => sourceId(q))); } catch (e) { return 0; }
+  for (const [index, q] of state.questions.entries()) {
+    const record = records[index];
     if (!record || record.generated) continue;
     const teacherDifficulty = record.difficulty_source === 'teacher';
     if (!(record.confirmed || record.edited || teacherDifficulty || record.crop_edited)) continue;
@@ -8223,8 +8456,15 @@ async function carryOverTeacherWork() {
   return kept;
 }
 
+// 保存排队进行：网站版一次保存要好几秒，前一次没存完时不能同时开始下一次，否则会互相覆盖。
+let bankSaveChain = Promise.resolve();
+function saveBankNow() {
+  bankSaveChain = bankSaveChain.then(saveBankOnce, saveBankOnce);
+  return bankSaveChain;
+}
+
 // 同一题重新分析或修改后覆盖旧记录，题目 ID 由来源信息决定。
-async function saveBankNow() {
+async function saveBankOnce() {
   if (!state.questions.length || !state.paper) return;
   try {
     const { paper, questions, assets } = currentPaperRecords();
@@ -8235,6 +8475,8 @@ async function saveBankNow() {
     await renderBank();
   } catch (e) {
     console.warn('题库保存失败', e);
+    // 网站版保存失败（断网、后台出错）要让老师知道，否则会以为已经存好了。
+    if (WIX_MODE) showAlert($('warning'), '题库保存失败', `${e.message || e} 修改还在页面上，网络恢复后再改动任意一处会重新保存。`);
   }
 }
 
@@ -8247,7 +8489,7 @@ function queueBankSave() {
     } catch (e) {
       console.warn('题库保存失败', e);
     }
-  }, 600);
+  }, WIX_MODE ? 2500 : 600); // 网站版每次保存都要调用后端，停手 2.5 秒后再存。
 }
 
 function bankSummary(rows) {
@@ -8372,10 +8614,11 @@ async function openPaperFromBank(paperId) {
   try {
     const paper = await bank.getPaper(paperId);
     if (!paper || !paper.source_assets.length) throw new UserError('打不开这份试卷', '旧版本入库的试卷没有保存原卷，请重新分析原卷文件。');
+    const records = (await bank.getQuestions(paper.question_ids)).filter(Boolean);
+    await bank.preloadAssets([...paper.source_assets, ...records.flatMap((q) => [q.snapshot_asset, ...(q.figures || []).map((f) => f.image_asset)])]);
     const blobs = await Promise.all(paper.source_assets.map((id) => bank.assetBlob(id)));
     if (blobs.some((blob) => !blob)) throw new UserError('原卷文件缺失', '题库里这份试卷的原卷文件不完整，请重新分析原卷文件。');
     const files = blobs.map((blob, index) => new File([blob], paper.files[index] || paper.file_name || `paper-${index + 1}`, { type: blob.type }));
-    const records = (await Promise.all(paper.question_ids.map((id) => bank.getQuestion(id)))).filter(Boolean);
     state.file = files[0];
     state.files = files;
     state.queue = [];
@@ -8391,6 +8634,7 @@ async function openPaperFromBank(paperId) {
     state.cropPages = paper.crop ? new Map(paper.crop.pages) : null;
     state.cropPageMarks = paper.crop ? paper.crop.page_marks : [];
     state.questions = await Promise.all(records.map(recordToQuestion));
+    bank.assetRecords = null; // 预读的文件记录只在打开这一次用，别的老师可能随后改动。
     // 刚读出来的图片和原卷就是题库里的，自动保存时不用再写一遍。
     state.savedAssets = new Map();
     records.forEach((record, index) => {
@@ -8422,12 +8666,16 @@ async function exportBankZip() {
 async function buildBankZip() {
   const [papers, questions, specs, feedback, assets] = await Promise.all(['papers', 'questions', 'specs', 'feedback', 'assets'].map((table) => bank.driver.getAll(table)));
   const zip = new window.JSZip();
-  const files = assets.map((asset, index) => {
+  const files = [];
+  for (const [index, asset] of assets.entries()) {
     const extension = { 'image/jpeg': '.jpg', 'image/png': '.png', 'application/pdf': '.pdf' }[asset.mime] || '';
     const file = `assets/${index}-${safeName(asset.id).slice(-80)}${extension}`;
-    zip.file(file, asset.blob);
-    return { id: asset.id, kind: asset.kind, owner: asset.owner, mime: asset.mime, size: asset.size, file };
-  });
+    // 网站版的文件在媒体库里，逐个下载后打包。
+    const blob = asset.blob || await bank.assetBlob(asset.id);
+    if (!blob) continue;
+    zip.file(file, blob);
+    files.push({ id: asset.id, kind: asset.kind, owner: asset.owner, mime: asset.mime, size: asset.size, file });
+  }
   zip.file('bank.json', JSON.stringify({
     format: BANK_FORMAT, schema_version: RECORD_VERSION, exported_at: new Date().toISOString(),
     papers, questions, specs, feedback, assets: files,
@@ -8475,10 +8723,11 @@ async function mergeBank(incoming) {
     if (newer(paper, await bank.getPaper(paper.paper_id))) papers.push(paper);
     else skipped.papers += 1;
   }
-  for (const question of incoming.questions) {
-    if (newer(question, await bank.getQuestion(question.source_id))) questions.push(question);
+  const existing = await bank.getQuestions(incoming.questions.map((q) => q.source_id));
+  incoming.questions.forEach((question, index) => {
+    if (newer(question, existing[index])) questions.push(question);
     else skipped.questions += 1;
-  }
+  });
   const accepted = new Set([...papers.map((p) => p.paper_id), ...questions.map((q) => q.source_id)]);
   const assets = incoming.assets.filter((asset) => accepted.has(asset.owner));
   const haveSpecs = new Set((await bank.listSpecs()).map((spec) => spec.version));
@@ -8848,7 +9097,7 @@ function setFiles(selected) {
 }
 
 function updateButton() {
-  $('analyze').disabled = !state.file || state.busy;
+  $('analyze').disabled = !state.file || state.busy || Boolean(state.wixBlocked);
 }
 
 /* ---------- 主流程 ---------- */
@@ -9505,6 +9754,22 @@ function exportCsv() {
 }
 
 /* ---------- 初始化 ---------- */
+// 本地版直接读浏览器里的题库；网站版先连上网站后台，连不上或没有权限时不能分析和入库。
+async function startStorage() {
+  if (WIX_MODE) {
+    try {
+      await startWixMode();
+    } catch (e) {
+      $('wixStatus').textContent = `${e.title || '连不上网站'}：${e.message || e}`;
+      $('wixStatus').classList.add('error');
+      $('analyze').disabled = true;
+      state.wixBlocked = true;
+      return;
+    }
+  }
+  await renderBank().catch((e) => showAlert($('warning'), '题库读取失败', e.message || String(e)));
+}
+
 function init() {
   $('dropText').textContent = DROP_HINT;
   // 已移除的服务留下的 Key 和模型，页面不再使用。
@@ -9604,7 +9869,7 @@ function init() {
   initVariantUi();
   $('bankCsv').addEventListener('click', exportBankCsv);
   $('bankClear').addEventListener('click', clearBank);
-  renderBank().catch((e) => console.warn('题库读取失败', e));
+  startStorage();
   $('exportCsv').addEventListener('click', exportCsv);
   $('onlyReview').addEventListener('change', (e) => $('cards').classList.toggle('review-only', e.target.checked));
   $('exportZip').addEventListener('click', exportZip);

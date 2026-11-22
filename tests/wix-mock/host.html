@@ -1,0 +1,239 @@
+<!doctype html>
+<!--
+  本地模拟 Wix：用 wix/backend/vceCore.js 和 wix/public/vceHost.js 的原代码，把 Wix 的数据库、媒体库、密钥、会员角色、
+  Gemini 换成内存里的模拟版，题库页面（index.html?host=wix）放在 iframe 里，和真实网站一样只通过 postMessage 通信。
+  用法：用本地服务器打开 /tests/wix-mock/host.html，页面上 window.mock 可以切换角色、让上传或下载失败、模拟 14 秒超时。
+  不发出任何真实请求。
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Wix 模拟环境</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  header { padding: 8px 12px; background: #1d2b36; color: #fff; font-size: 13px; }
+  iframe { width: 100%; height: calc(100vh - 34px); border: 0; display: block; }
+</style>
+</head>
+<body>
+<header id="bar">Wix 模拟环境：后端和数据都在内存里</header>
+<iframe id="app" title="题库页面"></iframe>
+<script type="module">
+import { createVceApi, COLLECTIONS, AI_JOBS } from '/wix/backend/vceCore.js';
+import { connectVceApp } from '/wix/public/vceHost.js';
+
+const mock = window.mock = {
+  roles: [{ title: 'Teacher' }],     // 改成 [] 模拟没有老师角色；改成 null 模拟没登录
+  memberId: 'member-1',
+  failUpload: false,                  // 浏览器直接上传失败（跨域等），走经后端转存
+  failDownload: false,                // 浏览器直接下载失败，走经后端读取
+  timeoutMs: 0,                       // >0 时模拟 Wix 后端超时：页面代码在这么久后收到错误，后端继续运行
+  collections: new Map(),
+  files: new Map(),                   // fileUrl → { bytes, mime, isPrivate, name }
+  trashed: [],
+  calls: [],                          // 后端方法调用记录
+  gemini: [],                         // 发给 Gemini 的请求（模拟）
+  limitErrors: [],
+};
+
+const SECRET = 'secret-from-secrets-manager';
+const coll = (name) => {
+  if (!mock.collections.has(name)) mock.collections.set(name, new Map());
+  return mock.collections.get(name);
+};
+const clone = (value) => structuredClone(value);
+const itemBytes = (item) => JSON.stringify(item).length;
+const fail = (message) => { mock.limitErrors.push(message); throw new Error(message); };
+
+// 模拟 wix-data：只实现用到的部分，并按 Wix 的上限报错（单条 500KB，批量 4MB / 1000 条，查询 1000 条）。
+function query(name) {
+  const state = { filters: [], skip: 0, limit: 50, sort: null };
+  const builder = {
+    hasSome(field, values) { state.filters.push((item) => values.includes(item[field])); return builder; },
+    eq(field, value) { state.filters.push((item) => item[field] === value); return builder; },
+    ascending(field) { state.sort = field; return builder; },
+    skip(n) { state.skip = n; return builder; },
+    limit(n) { if (n > 1000) fail(`查询 limit 超过 1000：${n}`); state.limit = n; return builder; },
+    async find() {
+      let items = [...coll(name).values()].filter((item) => state.filters.every((f) => f(item)));
+      if (state.sort) items.sort((a, b) => String(a[state.sort]).localeCompare(String(b[state.sort])));
+      const page = (skip) => {
+        const slice = items.slice(skip, skip + state.limit).map(clone);
+        return { items: slice, hasNext: () => skip + state.limit < items.length, next: async () => page(skip + state.limit), totalCount: items.length };
+      };
+      return page(state.skip);
+    },
+  };
+  return builder;
+}
+const data = {
+  query,
+  async get(name, id) { const item = coll(name).get(id); return item ? clone(item) : null; },
+  async insert(name, item) {
+    if (itemBytes(item) > 500 * 1024) fail(`单条超过 500KB：${name}`);
+    const saved = { ...item, _id: item._id || `id-${Math.random().toString(36).slice(2)}` };
+    coll(name).set(saved._id, clone(saved));
+    return clone(saved);
+  },
+  async update(name, item) {
+    if (itemBytes(item) > 500 * 1024) fail(`单条超过 500KB：${name}`);
+    coll(name).set(item._id, clone(item));
+    return clone(item);
+  },
+  async remove(name, id) { coll(name).delete(id); },
+  async bulkSave(name, items) {
+    if (items.length > 1000) fail(`批量写入超过 1000 条：${items.length}`);
+    if (items.reduce((s, i) => s + itemBytes(i), 0) > 4 * 1024 * 1024) fail(`批量写入超过 4MB：${name}`);
+    items.forEach((item) => {
+      if (itemBytes(item) > 500 * 1024) fail(`单条超过 500KB：${name} ${item._id}`);
+      coll(name).set(item._id, clone(item));
+    });
+    return { inserted: items.length };
+  },
+  async bulkRemove(name, ids) {
+    if (ids.length > 1000) fail(`批量删除超过 1000 条：${ids.length}`);
+    ids.forEach((id) => coll(name).delete(id));
+    return { removed: ids.length };
+  },
+};
+
+// 模拟媒体库。上传地址和下载地址用假的 https 地址，iframe 里的 fetch 会被拦截（见下面 patchFrame）。
+let uploads = 0;
+const media = {
+  async getUploadUrl(path, options) {
+    uploads += 1;
+    return { uploadUrl: `https://upload.mock/${uploads}?private=${options.metadataOptions.isPrivate}&mime=${encodeURIComponent(options.mediaOptions.mimeType)}` };
+  },
+  async getFileInfo(fileName) {
+    const entry = [...mock.files.entries()].find(([, file]) => file.name === fileName);
+    if (!entry) throw new Error(`媒体库里没有 ${fileName}`);
+    return { fileUrl: entry[0], fileName };
+  },
+  async upload(path, bytes, fileName, options) {
+    const name = `${Math.random().toString(36).slice(2)}_${fileName}`;
+    const kind = options.mediaOptions.mediaType === 'image' ? 'image' : 'document';
+    const fileUrl = `wix:${kind}://v1/${name}/${fileName}`;
+    mock.files.set(fileUrl, { bytes: new Uint8Array(bytes), mime: options.mediaOptions.mimeType, isPrivate: options.metadataOptions.isPrivate, name });
+    return { fileUrl, fileName: name };
+  },
+  async getDownloadUrl(fileUrl) {
+    if (!mock.files.has(fileUrl)) throw new Error(`媒体库里没有 ${fileUrl}`);
+    return `https://download.mock/?file=${encodeURIComponent(fileUrl)}`;
+  },
+  async moveFilesToTrash(fileUrls) {
+    fileUrls.forEach((url) => { mock.trashed.push(url); mock.files.delete(url); });
+  },
+};
+
+const bytesToBase64 = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  let text = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+};
+const base64ToBytes = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+
+// 模拟后端的 fetch：下载媒体库文件、调用 Gemini（返回固定内容，并检查 Key 来自 Secrets）。
+async function httpFetch(url, options = {}) {
+  if (url.startsWith('https://download.mock/')) {
+    const file = mock.files.get(new URL(url).searchParams.get('file'));
+    return file ? new Response(file.bytes, { status: 200 }) : new Response('not found', { status: 404 });
+  }
+  if (url.startsWith('https://generativelanguage.googleapis.com/')) {
+    const body = JSON.parse(options.body);
+    const parts = body.contents[0].parts;
+    const record = {
+      keyFromSecret: options.headers['x-goog-api-key'] === SECRET,
+      images: parts.filter((p) => p.inlineData && p.inlineData.mimeType.startsWith('image/')).length,
+      pdfBytes: parts.filter((p) => p.inlineData && p.inlineData.mimeType === 'application/pdf').map((p) => atob(p.inlineData.data).length)[0] || 0,
+      wixMediaLeft: parts.filter((p) => p.wixMedia).length,
+    };
+    mock.gemini.push(record);
+    await new Promise((r) => setTimeout(r, 300));
+    const text = parts.filter((p) => p.text).map((p) => p.text).join('\n');
+    if (mock.geminiStatus) return new Response(JSON.stringify({ error: { code: mock.geminiStatus, message: 'mock error', status: 'RESOURCE_EXHAUSTED' } }), { status: mock.geminiStatus });
+    const reply = mock.geminiReply ? mock.geminiReply(text, body) : { ok: true };
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify(reply) }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50, totalTokenCount: 150 },
+    }), { status: 200 });
+  }
+  throw new Error(`模拟后端不允许访问 ${url}`);
+}
+
+const api = createVceApi({
+  data, dataOptions: { suppressAuth: true }, media,
+  getSecret: async (name) => (name === 'GEMINI_API_KEY' ? SECRET : null),
+  httpFetch,
+  getRoles: async () => { if (mock.roles === null) throw new Error('not logged in'); return mock.roles; },
+  getMemberId: async () => mock.memberId,
+  encodeBase64: bytesToBase64,
+  decodeBase64: base64ToBytes,
+});
+
+// 模拟 Wix 后端的 14 秒限制：页面代码在 timeoutMs 后收到错误，但后端继续运行。
+const backend = new Proxy(api, {
+  get(target, name) {
+    const fn = target[name];
+    if (typeof fn !== 'function') return fn;
+    return (...args) => {
+      mock.calls.push(name);
+      const run = fn(...args);
+      if (!mock.timeoutMs) return run;
+      return Promise.race([run, new Promise((_, reject) => setTimeout(() => reject(new Error('504 Gateway Timeout')), mock.timeoutMs))]);
+    };
+  },
+});
+
+// 模拟 HTML 组件：iframe 发给 window.parent 的消息交给 onMessage；postMessage 发进 iframe。
+const frame = document.getElementById('app');
+const component = {
+  handlers: [],
+  onMessage(handler) { this.handlers.push(handler); },
+  postMessage(message) { frame.contentWindow.postMessage(message, location.origin); },
+};
+window.addEventListener('message', (event) => {
+  if (event.source !== frame.contentWindow) return;
+  component.handlers.forEach((handler) => handler({ data: event.data }));
+});
+connectVceApp(component, backend);
+
+// iframe 里访问假的上传、下载地址时，由这里代答（真实网站上是 Wix 的媒体库服务）。
+function patchFrame() {
+  const win = frame.contentWindow;
+  const realFetch = win.fetch.bind(win);
+  win.fetch = async (url, options = {}) => {
+    const text = String(url);
+    if (text.startsWith('https://upload.mock/')) {
+      if (mock.failUpload) throw new TypeError('Failed to fetch (模拟跨域失败)');
+      const params = new URL(text).searchParams;
+      const file = options.body.get('file');
+      const name = `${Math.random().toString(36).slice(2)}_${file.name}`;
+      const mime = params.get('mime');
+      const kind = mime.startsWith('image/') ? 'image' : 'document';
+      mock.files.set(`wix:${kind}://v1/${name}/${file.name}`, { bytes: new Uint8Array(await file.arrayBuffer()), mime, isPrivate: params.get('private') === 'true', name });
+      return new Response(JSON.stringify([{ file_name: name, original_file_name: file.name, mime_type: mime }]), { status: 200 });
+    }
+    if (text.startsWith('https://download.mock/')) {
+      if (mock.failDownload) throw new TypeError('Failed to fetch (模拟跨域失败)');
+      const file = mock.files.get(new URL(text).searchParams.get('file'));
+      return file ? new Response(new Blob([file.bytes], { type: file.mime }), { status: 200 }) : new Response('not found', { status: 404 });
+    }
+    if (/generativelanguage/.test(text)) throw new Error('题库页面不应该直接访问 Gemini');
+    return realFetch(url, options);
+  };
+}
+
+mock.load = (query = '') => new Promise((resolve) => {
+  frame.onload = () => { patchFrame(); resolve(frame.contentWindow); };
+  frame.src = `/index.html?host=wix${query}`;
+});
+mock.app = () => frame.contentWindow;
+mock.records = (table) => [...coll(COLLECTIONS[table]).values()].map((item) => JSON.parse(item.json));
+mock.items = (table) => [...coll(COLLECTIONS[table]).values()];
+mock.jobs = () => [...coll(AI_JOBS).values()];
+mock.reset = () => { mock.collections.clear(); mock.files.clear(); mock.trashed = []; mock.calls = []; mock.gemini = []; mock.limitErrors = []; };
+mock.load();
+</script>
+</body>
+</html>

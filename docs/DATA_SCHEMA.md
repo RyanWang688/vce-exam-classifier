@@ -79,8 +79,12 @@
 
 导入时按主键合并：同一题、同一份试卷以 `updated_at` 较新的为准；规范按版本号合并；审核意见按 ID 去重。这也是把本地题库搬到 Wix 的通道。
 
-## 迁到 Wix 时要换的部分
+## 网站版（Wix）
 
-1. 写一个 Wix 驱动，实现 `getAll / get / put / remove / clear` 五个方法，分别调用 `wix-data`；`assets` 表改为上传到媒体库、返回文件链接。
-2. 把 `created_by`、`updated_by` 改为当前会员 ID，并在集合权限里限制谁能删除。
-3. 题目多了以后，组卷改为按科目、知识点、难度在服务端查询并分页，不再一次读全部题目。
+已经实现，安装步骤见 [WIX_GUIDE.md](../WIX_GUIDE.md)。
+
+- 页面里的 `wixDriver()` 把驱动的操作（`getAll / get / getMany / write`，以及读文件的 `readAsset`）转成对网站后端的调用。
+- 每张表对应一个集合（`VceQuestions`、`VcePapers`、`VceAssets`、`VceSpecs`、`VceFeedback`），整条记录存在 `json` 字段，`_id` 由主键换成安全字符得到。
+- `assets` 表只存文件记录（`file_url` 是媒体库地址），文件本身在媒体库的 `vce-bank/` 文件夹：原卷私密，裁图和配图公开。
+- `created_by`、`updated_by` 由后端写成当前会员 ID，前端写的不算。
+- 还没做：题目很多以后，组卷改为按科目、知识点、难度在后端查询，不再一次读全部题目。

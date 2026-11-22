@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  粘贴到 Wix“题库”页面的 HTML 组件（ID：vceApp，选“代码”方式）。
+  它从下面的地址取回题库页面（index.html）并在组件里运行，题库页面再通过 postMessage 和页面代码通信。
+  只需要改两处：APP_URL（index.html 放在哪里）和 SITE_ORIGIN（你的网站地址）。
+-->
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family: sans-serif; padding: 16px">
+<p id="loading">正在加载题库…</p>
+<script>
+  // index.html 的地址，必须是 https，并且允许跨域读取（GitHub Pages 可以）。
+  var APP_URL = 'https://ryanwang688.github.io/vce-exam-classifier/index.html';
+  // 你的网站地址（不带路径），消息只发给这个地址，防止被别的网站截获。
+  var SITE_ORIGIN = 'https://www.example.com';
+
+  fetch(APP_URL, { cache: 'no-cache' })
+    .then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.text();
+    })
+    .then(function (html) {
+      var base = new URL('./', APP_URL).href;
+      var setup = '<base href="' + base + '"><script>window.__VCE_HOST = "wix"; window.__VCE_PARENT_ORIGIN = ' + JSON.stringify(SITE_ORIGIN) + ';<\/script>';
+      html = html.replace(/<head[^>]*>/i, function (head) { return head + setup; });
+      document.open();
+      document.write(html);
+      document.close();
+    })
+    .catch(function (error) {
+      document.getElementById('loading').textContent = '题库页面加载失败：' + error.message + '。请检查 APP_URL。';
+    });
+</script>
+</body>
+</html>
