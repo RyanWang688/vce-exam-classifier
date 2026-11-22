@@ -133,11 +133,19 @@
 
   (async () => {
     const report = [];
-    for (const item of CASES) {
-      let failures;
-      try { failures = await runCase(item); } catch (e) { failures = [`运行失败：${e.message || e}`]; }
-      report.push({ file: item.file, note: item.note, ok: !failures.length, failures });
-      console.log(`${failures.length ? '✗' : '✓'} ${item.file}`, failures);
+    // 测试期间换成内存题库：测试卷不进真实题库，老师在真实题库里的修改也不会影响测试结果。
+    const realDriver = bank.driver;
+    bank.use(memoryDriver());
+    try {
+      for (const item of CASES) {
+        let failures;
+        try { failures = await runCase(item); } catch (e) { failures = [`运行失败：${e.message || e}`]; }
+        report.push({ file: item.file, note: item.note, ok: !failures.length, failures });
+        console.log(`${failures.length ? '✗' : '✓'} ${item.file}`, failures);
+      }
+    } finally {
+      clearTimeout(bankTimer);
+      bank.use(realDriver);
     }
     window.regressionReport = report;
     console.log(`通过 ${report.filter((r) => r.ok).length} / ${report.length}`);

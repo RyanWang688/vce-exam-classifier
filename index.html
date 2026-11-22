@@ -261,6 +261,8 @@
   .region-raw { margin-right: auto; font-size: 13px; display: flex; gap: 6px; align-items: center; }
   .crop-tools { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
   .tag.edited-crop { background: #e7f3f3; color: var(--accent); }
+  .bank-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  #bankPapers h4 { margin: 14px 0 6px; }
 
   [hidden] { display: none !important; }
   @media (max-width: 980px) {
@@ -493,8 +495,12 @@
     <details id="bank" class="panel bank" hidden>
       <summary id="bankTitle"></summary>
       <div id="bankBody"></div>
+      <div id="bankPapers"></div>
+      <p class="hint">题库存在这台电脑的浏览器里，清除浏览器数据会一起删掉。请定期“导出完整题库”备份；换电脑或迁到网站时用“导入题库”。</p>
       <div class="row" style="margin-top:10px">
-        <button id="bankJson" type="button">导出题库 JSON</button>
+        <button id="bankJson" type="button">导出完整题库（ZIP）</button>
+        <button id="bankImport" type="button">导入题库</button>
+        <input id="bankImportFile" type="file" accept=".zip,.json,application/zip,application/json" hidden>
         <button id="bankCsv" type="button">导出题库 CSV</button>
         <button id="bankClear" type="button">清空题库</button>
       </div>
@@ -5703,7 +5709,7 @@ function renderPaperTopics() {
 }
 
 // 真题要有裁图；AI 题要老师通过后才能被抽到。
-const usableInPaper = (row) => (row.generated ? row.status === 'approved' : Boolean(row.snapshot));
+const usableInPaper = (row) => (row.generated ? row.status === 'approved' : hasImage(row));
 
 function buildPaper(newSeed) {
   if (newSeed) paperState.seed = Math.floor(Math.random() * 1e9);
@@ -5765,7 +5771,7 @@ function renderPaperView() {
       return;
     }
     const image = el('img', 'qshot');
-    image.src = row.snapshot;
+    rowImage(row).then((url) => { if (url && !image.src) image.src = url; }).catch(() => {});
     image.alt = `第 ${index + 1} 题`;
     const relabel = row.heading_box ? '' : ' · 原题号没有替换：这道题是旧版本入库的，重新分析这份试卷后即可替换';
     item.append(head, el('div', 'source-line', `来源：${row.source.label}${note}${relabel}`), image, tools);
@@ -5801,7 +5807,7 @@ function swapPaperQuestion(index) {
 async function setBankDifficulty(row, value) {
   row.difficulty = value;
   row.difficulty_source = value ? 'teacher' : '';
-  await bankRequest('readwrite', (store) => store.put(row));
+  await bank.putQuestion(row);
   renderPaperView();
 }
 
@@ -5815,6 +5821,7 @@ async function printPaper() {
   sheet.append(title, info, el('p', 'print-name', '姓名：____________________'));
   const marksText = (row) => `${row.marks} mark${row.marks === 1 ? '' : 's'}`;
   const images = await Promise.all(picked.map((row, index) => (row.generated ? null : relabeledSnapshot(row, index + 1).catch(() => null))));
+  const originals = await Promise.all(picked.map((row) => (row.generated ? null : rowImage(row).catch(() => null))));
   picked.forEach((row, index) => {
     const block = el('div', 'print-q');
     if (row.generated) {
@@ -5826,7 +5833,7 @@ async function printPaper() {
       // 换好题号的裁图不再另加题号；换不了的保留原图，在上方注明新题号。
       if (!images[index]) block.append(el('div', 'print-label', `第 ${index + 1} 题（${row.marks} 分，图中为原题号）`));
       const image = el('img');
-      image.src = images[index] || row.snapshot;
+      image.src = images[index] || originals[index];
       block.append(image);
     }
     sheet.append(block);
@@ -5906,10 +5913,11 @@ function inkBounds(context, x0, y0, x1, y1) {
 
 async function relabeledSnapshot(row, number) {
   const box = row.heading_box;
-  if (!box || !row.snapshot) return null;
-  const key = `${row.source_id}|${number}`;
+  if (!box || !hasImage(row)) return null;
+  // 带上修改时间：手动调整裁图后要重新换题号，不能用旧图。
+  const key = `${row.source_id}|${row.updated_at || ''}|${number}`;
   if (relabelCache.has(key)) return relabelCache.get(key);
-  const image = await loadImage(row.snapshot);
+  const image = await loadImage(await rowImage(row));
   const canvas = document.createElement('canvas');
   canvas.width = image.naturalWidth;
   canvas.height = image.naturalHeight;
@@ -6007,7 +6015,6 @@ const DEFAULT_SPEC = `## 通用
 ## 答案
 - 给出最终答案、完整解答，以及每一分对应哪一步的评分要点。`;
 
-const AI_DB_VERSION = 2;
 const GEN_REASONS = ['答案错', '太简单', '太难', '超纲', '用语不像 VCAA', '和原题太像', '缺条件或有歧义', '其他'];
 const aiState = { running: false, abort: null, rejected: [], usage: { promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 } };
 
@@ -6039,7 +6046,7 @@ function aiCost() {
 
 /* 出题规范：带版本，存在题库数据库里 */
 async function specList() {
-  return (await bankRequest('readonly', (store) => store.getAll(), 'specs')).sort((a, b) => b.version - a.version);
+  return bank.listSpecs();
 }
 
 async function currentSpec() {
@@ -6050,7 +6057,7 @@ async function currentSpec() {
 async function saveSpec(text, note) {
   const list = await specList();
   const version = (list[0] ? list[0].version : 0) + 1;
-  await bankRequest('readwrite', (store) => store.put({ version, text, note, created: new Date().toISOString() }), 'specs');
+  await bank.putSpec({ version, text, note, created: new Date().toISOString(), created_by: BANK_USER });
   return version;
 }
 
@@ -6084,7 +6091,7 @@ ${request}`;
 }
 
 async function feedbackRows() {
-  return bankRequest('readonly', (store) => store.getAll(), 'feedback');
+  return bank.listFeedback();
 }
 
 // 审核时退回的原因和老师的意见，汇总成规范修改建议，老师确认后才保存。
@@ -6140,13 +6147,15 @@ const DIFFICULTY_MEANING = {
 };
 const TYPE_NAMES = { 'multiple choice': 'multiple-choice question (1 mark)', 'short answer': 'short-answer question', 'extended response': 'extended-response question with parts' };
 
-function exampleParts(examples) {
+async function exampleParts(examples) {
   const parts = [];
-  examples.forEach((row, index) => {
+  for (const [index, row] of examples.entries()) {
     parts.push({ text: `Example ${index + 1}: ${row.source.label}. Topic: ${row.topic}. Type: ${row.question_type}. Marks: ${row.marks}. Difficulty: ${row.difficulty || 'not labelled'}.` });
-    if (row.snapshot) parts.push({ inlineData: { mimeType: 'image/jpeg', data: row.snapshot.split(',')[1] } });
+    // 题库里的图片单独存着，发给 AI 前读成 base64。
+    const image = isDataUrl(row.snapshot) ? row.snapshot : (row.snapshot_asset ? await bank.assetDataUrl(row.snapshot_asset) : null);
+    if (image) parts.push({ inlineData: { mimeType: (image.match(/^data:([^;,]+)/) || [])[1] || 'image/jpeg', data: image.split(',')[1] } });
     else parts.push({ text: generatedText(row) });
-  });
+  }
   return parts;
 }
 
@@ -6273,7 +6282,7 @@ async function generateQuestion(request, examples, spec, onStep) {
   let lastFatal = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     onStep(attempt ? '重新出题…' : '出题…');
-    const raw = await aiCall([...exampleParts(examples), { text: generationPrompt(spec.text, request) }], QUESTION_SCHEMA);
+    const raw = await aiCall([...(await exampleParts(examples)), { text: generationPrompt(spec.text, request) }], QUESTION_SCHEMA);
     const row = {
       source_id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       generated: true,
@@ -6362,7 +6371,7 @@ function gapRequests(options, picked, rows) {
 // 同知识点的题不够时，用同科目的其他题补足，只让 AI 学风格。
 function pickExamples(request, rows, recentlyUsed) {
   const usable = rows.filter((row) => row.subject === request.subject && row.source_id !== (request.template || {}).source_id &&
-    (!row.generated || row.status === 'approved') && (row.snapshot || row.generated));
+    (!row.generated || row.status === 'approved') && (hasImage(row) || row.generated));
   const score = (row) => (row.topic === request.topic ? 6 : 0) + (row.question_type === request.question_type ? 2 : 0) +
     ((row.difficulty || 'medium') === request.difficulty ? 1 : 0) + (row.generated ? 0 : 0.5) -
     (recentlyUsed.has(row.source_id) ? 3 : 0) + Math.random() * 0.5;
@@ -6397,7 +6406,7 @@ async function runGeneration(requests, onProgress) {
         failed.push(`${request.topic}：${result.reasons.join('、')}`);
         continue;
       }
-      await bankRequest('readwrite', (store) => store.put(result));
+      await bank.putQuestion(result);
       made.push(result);
     }
   } finally {
@@ -6410,11 +6419,12 @@ async function runGeneration(requests, onProgress) {
 async function reviewGenerated(row, decision, reasons, note) {
   row.status = decision === 'approve' ? 'approved' : 'rejected';
   row.reviewed = new Date().toISOString();
-  await bankRequest('readwrite', (store) => store.put(row));
-  await bankRequest('readwrite', (store) => store.add({
+  row.reviewed_by = BANK_USER;
+  await bank.putQuestion(row);
+  await bank.addFeedback({
     question: row.source_id, decision, reasons, note, subject: row.subject, topic: row.topic,
-    question_type: row.question_type, spec_version: row.spec_version, created: row.reviewed, used: false,
-  }), 'feedback');
+    question_type: row.question_type, spec_version: row.spec_version, created: row.reviewed, created_by: BANK_USER, used: false,
+  });
 }
 
 /* ---------- 第三阶段：带图的题、按样板出题 ---------- */
@@ -6666,9 +6676,9 @@ function renderTemplatePicker() {
     button.type = 'button';
     button.addEventListener('click', () => addTemplate(row));
     item.append(el('div', 'hint', `${row.source.label} · ${row.marks} 分 · ${DIFFICULTY_LABELS[row.difficulty] || '未标难度'}`));
-    if (row.snapshot) {
+    if (hasImage(row)) {
       const image = el('img', 'pick-img');
-      image.src = row.snapshot;
+      rowImage(row).then((url) => { if (url) image.src = url; }).catch(() => {});
       image.alt = row.source.label;
       item.append(image);
     } else {
@@ -6941,15 +6951,9 @@ async function specAction(button, work) {
 }
 
 async function markFeedbackUsed(ids, version) {
-  await bankRequest('readwrite', (store) => {
-    ids.forEach((id) => {
-      const request = store.get(id);
-      request.onsuccess = () => {
-        if (request.result) store.put({ ...request.result, used: version });
-      };
-    });
-    return { result: null };
-  }, 'feedback');
+  const wanted = new Set(ids);
+  const items = (await bank.listFeedback()).filter((item) => wanted.has(item.id));
+  await bank.putFeedback(items.map((item) => ({ ...item, used: version })));
 }
 
 function initAiUi() {
@@ -7251,8 +7255,10 @@ async function runRules(taxonomy, started) {
       q.area = questions[index].area;
     });
   }
+  const kept = await carryOverTeacherWork();
   renderUsage({ promptTokenCount: 0, candidatesTokenCount: 0, thoughtsTokenCount: 0, totalTokenCount: 0 }, performance.now() - started);
   renderResult();
+  if (kept) showAlert($('warning'), '保留了老师之前的修改', `这份试卷题库里已有，${kept} 道题沿用了之前确认或修改过的知识点、题型、难度和手动调整的裁图。`);
   if (state.docxNote) showAlert($('warning'), 'Word 文档有部分内容读不到', state.docxNote);
   if (coverNote) showAlert($('warning'), '切题结果和封面不一致', coverNote);
   state.meta.cover_check = coverNote || null;
@@ -7855,46 +7861,377 @@ function renderStats() {
   queueBankSave();
 }
 
-/* ---------- 题库：存在浏览器 IndexedDB，换设备不会同步 ---------- */
+/* ---------- 题库 ----------
+ * 页面只通过 bank（题库接口）读写。底层驱动现在是浏览器的 IndexedDB，迁到 Wix 时换成 Wix 驱动即可。
+ * 表结构和版本升级见 docs/DATA_SCHEMA.md。图片和原卷文件单独存在 assets 表，记录里只写文件 ID。
+ */
 let bankTimer = null;
+const BANK_DB = 'vceQuestionBank';
+const BANK_DB_VERSION = 3;          // IndexedDB 的版本。2 及以前：图片直接放在题目记录里。
+const RECORD_VERSION = 2;           // 记录格式的版本，写在每条记录的 schema_version 里。
+const BANK_TABLES = { questions: 'source_id', papers: 'paper_id', assets: 'id', specs: 'version', feedback: 'id' };
+const BANK_USER = 'local';          // 操作人。Wix 里换成会员 ID。
+const BANK_FORMAT = 'vce-question-bank';
 
-function openBank() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('vceQuestionBank', AI_DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains('questions')) db.createObjectStore('questions', { keyPath: 'source_id' });
-      if (!db.objectStoreNames.contains('specs')) db.createObjectStore('specs', { keyPath: 'version' });
-      if (!db.objectStoreNames.contains('feedback')) db.createObjectStore('feedback', { keyPath: 'id', autoIncrement: true });
+function dataUrlToBlob(url) {
+  const [head, data] = String(url).split(',');
+  const mime = (head.match(/^data:([^;,]+)/) || [])[1] || 'application/octet-stream';
+  if (!/;base64$/.test(head)) return new Blob([decodeURIComponent(data)], { type: mime });
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+const isDataUrl = (value) => typeof value === 'string' && value.startsWith('data:');
+const makeAsset = (id, kind, owner, blob) => ({ id, kind, owner, blob, mime: blob.type || 'application/octet-stream', size: blob.size });
+
+// 试卷 ID：原卷文件的 SHA-256；没有时用来源信息拼。
+function paperIdFromSource(source) {
+  if (source.file_sha256) return source.file_sha256;
+  return `paper-${[source.publisher, source.year, source.paper_title, source.paper_type].map(slug).filter(Boolean).join('-') || 'unknown'}`;
+}
+
+// 记录版本 1（图片直接放在记录里）→ 版本 2。返回新记录和拆出来的文件。导入旧文件时也用这个。
+function upgradeQuestion(row) {
+  if (!row || row.schema_version >= RECORD_VERSION) return { record: row, assets: [] };
+  const id = row.source_id;
+  const assets = [];
+  const record = { ...row, schema_version: RECORD_VERSION };
+  if (isDataUrl(row.snapshot)) {
+    assets.push(makeAsset(`${id}#snapshot`, 'snapshot', id, dataUrlToBlob(row.snapshot)));
+    record.snapshot_asset = `${id}#snapshot`;
+  }
+  delete record.snapshot;
+  if (Array.isArray(row.figures)) {
+    record.figures = row.figures.map((figure, index) => {
+      const copy = { ...figure };
+      if (isDataUrl(figure.image)) {
+        assets.push(makeAsset(`${id}#figure-${index}`, 'figure', id, dataUrlToBlob(figure.image)));
+        copy.image_asset = `${id}#figure-${index}`;
+      }
+      delete copy.image;
+      return copy;
+    });
+  }
+  record.paper_id = row.generated ? null : (row.paper_id || paperIdFromSource(row.source || {}));
+  record.created_at = row.created_at || row.created || row.saved_at || null;
+  record.updated_at = row.updated_at || row.saved_at || row.reviewed || row.created || null;
+  record.created_by = row.created_by || BANK_USER;
+  record.updated_by = row.updated_by || BANK_USER;
+  delete record.saved_at;
+  return { record, assets };
+}
+
+// 旧题库没有试卷表，按题目的来源信息补出来。旧试卷没有存原卷，要调整裁图需重新分析。
+function legacyPapers(records) {
+  const papers = new Map();
+  records.filter((record) => record.paper_id).forEach((record) => {
+    const source = record.source || {};
+    if (!papers.has(record.paper_id)) {
+      papers.set(record.paper_id, {
+        schema_version: RECORD_VERSION, paper_id: record.paper_id, subject: record.subject || null, unit: record.unit || null,
+        year: source.year == null ? null : source.year, publisher: source.publisher || null, paper_title: source.paper_title || null,
+        paper_type: source.paper_type || null, info: null, file_name: source.file || null, files: [], file_type: null,
+        source_assets: [], crop: null, meta: {}, question_ids: [],
+        created_at: record.created_at, updated_at: record.updated_at, created_by: BANK_USER, updated_by: BANK_USER,
+      });
+    }
+    papers.get(record.paper_id).question_ids.push(record.source_id);
+  });
+  return [...papers.values()];
+}
+
+/* 驱动：五个基本操作。write 一次提交多张表的写入（全部成功或全部失败）。 */
+function indexedDbDriver() {
+  let opening = null;
+  const request = (r) => new Promise((resolve, reject) => {
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  // 旧版本升级：拆出图片、补出试卷表。在升级事务里完成，中途失败会整体回滚。
+  const migrate = (transaction) => {
+    const questions = transaction.objectStore('questions');
+    const records = [];
+    questions.openCursor().onsuccess = (event) => {
+      const cursor = event.target.result;
+      if (!cursor) {
+        legacyPapers(records).forEach((paper) => transaction.objectStore('papers').put(paper));
+        return;
+      }
+      const { record, assets } = upgradeQuestion(cursor.value);
+      assets.forEach((asset) => transaction.objectStore('assets').put(asset));
+      cursor.update(record);
+      records.push(record);
+      cursor.continue();
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  };
+  const open = () => opening || (opening = new Promise((resolve, reject) => {
+    const r = indexedDB.open(BANK_DB, BANK_DB_VERSION);
+    r.onupgradeneeded = (event) => {
+      const db = r.result;
+      Object.entries(BANK_TABLES).forEach(([name, keyPath]) => {
+        if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, name === 'feedback' ? { keyPath, autoIncrement: true } : { keyPath });
+      });
+      if (event.oldVersion > 0 && event.oldVersion < 3) migrate(r.transaction);
+    };
+    r.onsuccess = () => {
+      const db = r.result;
+      db.onversionchange = () => { db.close(); opening = null; }; // 另一个标签页升级了数据库。
+      resolve(db);
+    };
+    r.onerror = () => { opening = null; reject(r.error); };
+    r.onblocked = () => console.warn('题库升级被其他打开的标签页挡住了，请关掉其他标签页后刷新。');
+  }));
+  const read = async (table, work) => {
+    const db = await open();
+    return request(work(db.transaction(table, 'readonly').objectStore(table)));
+  };
+  return {
+    name: 'IndexedDB',
+    getAll: (table) => read(table, (store) => store.getAll()),
+    get: (table, id) => read(table, (store) => store.get(id)),
+    async write(ops) {
+      const db = await open();
+      const tables = [...new Set(ops.map((op) => op.table))];
+      if (!tables.length) return;
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(tables, 'readwrite');
+        ops.forEach(({ table, put = [], remove = [], clear = false }) => {
+          const store = transaction.objectStore(table);
+          if (clear) store.clear();
+          remove.forEach((id) => store.delete(id));
+          put.forEach((record) => store.put(record));
+        });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error('题库写入被中断'));
+      });
+    },
+  };
 }
 
-async function bankRequest(mode, action, storeName = 'questions') {
-  const db = await openBank();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, mode);
-    const result = action(transaction.objectStore(storeName));
-    transaction.oncomplete = () => { db.close(); resolve(result.result); };
-    transaction.onerror = () => { db.close(); reject(transaction.error); };
-  });
+// 测试用：存在内存里，行为和真实驱动一样（读出的是副本）。也是写 Wix 驱动时的参照。
+function memoryDriver() {
+  const tables = Object.fromEntries(Object.keys(BANK_TABLES).map((name) => [name, new Map()]));
+  const copy = (value) => (value === undefined ? undefined : structuredClone(value));
+  return {
+    name: 'memory',
+    tables,
+    getAll: async (table) => [...tables[table].values()].map(copy),
+    get: async (table, id) => copy(tables[table].get(id)),
+    async write(ops) {
+      ops.forEach(({ table, put = [], remove = [], clear = false }) => {
+        if (clear) tables[table].clear();
+        remove.forEach((id) => tables[table].delete(id));
+        put.forEach((record) => tables[table].set(record[BANK_TABLES[table]], copy(record)));
+      });
+    },
+  };
 }
 
-const bankRows = () => bankRequest('readonly', (store) => store.getAll());
+const assetUrls = new Map(); // 文件 ID → 浏览器内的临时链接，重复显示同一张图不用再读数据库。
+
+const bank = {
+  driver: null,
+  use(driver) {
+    this.driver = driver;
+    assetUrls.forEach((url) => URL.revokeObjectURL(url));
+    assetUrls.clear();
+  },
+  async write(ops) {
+    await this.driver.write(ops.filter((op) => op.clear || (op.put || []).length || (op.remove || []).length));
+    ops.filter((op) => op.table === 'assets').forEach((op) => [...(op.put || []).map((a) => a.id), ...(op.remove || [])].forEach((id) => {
+      if (assetUrls.has(id)) URL.revokeObjectURL(assetUrls.get(id));
+      assetUrls.delete(id);
+    }));
+  },
+  stamp(record, existing) {
+    const now = new Date().toISOString();
+    record.schema_version = RECORD_VERSION;
+    record.created_at = (existing && existing.created_at) || record.created_at || now;
+    record.created_by = (existing && existing.created_by) || record.created_by || BANK_USER;
+    record.updated_at = now;
+    record.updated_by = BANK_USER;
+    return record;
+  },
+  listQuestions() { return this.driver.getAll('questions'); },
+  getQuestion(id) { return this.driver.get('questions', id); },
+  async putQuestion(record) {
+    this.stamp(record, await this.getQuestion(record.source_id));
+    await this.write([{ table: 'questions', put: [record] }]);
+  },
+  listPapers() { return this.driver.getAll('papers'); },
+  getPaper(id) { return this.driver.get('papers', id); },
+  // 存一份试卷和它的题。来源信息改了以后题目 ID 会变，旧 ID 的题和它们的图片要删掉，否则会重复。
+  async savePaper(paper, questions, assets) {
+    const old = await this.getPaper(paper.paper_id);
+    const oldIds = old ? old.question_ids : [];
+    const oldRecords = (await Promise.all(oldIds.map((id) => this.getQuestion(id)))).filter(Boolean);
+    const byId = new Map(oldRecords.map((record) => [record.source_id, record]));
+    const newIds = new Set(questions.map((q) => q.source_id));
+    questions.forEach((q) => this.stamp(q, byId.get(q.source_id)));
+    this.stamp(paper, old);
+    const used = new Set([
+      ...questions.flatMap((q) => [q.snapshot_asset, ...(q.figures || []).map((f) => f.image_asset)]),
+      ...paper.source_assets,
+    ].filter(Boolean));
+    const oldAssets = [
+      ...oldRecords.flatMap((q) => [q.snapshot_asset, ...(q.figures || []).map((f) => f.image_asset)]),
+      ...(old ? old.source_assets : []),
+    ].filter(Boolean);
+    const removed = [...new Set(oldAssets)].filter((id) => !used.has(id));
+    await this.write([
+      { table: 'questions', put: questions, remove: oldIds.filter((id) => !newIds.has(id)) },
+      { table: 'papers', put: [paper] },
+      { table: 'assets', put: assets, remove: removed },
+    ]);
+    return removed; // 调用方据此更新“已保存”的记录。
+  },
+  async deletePaper(paperId) {
+    const paper = await this.getPaper(paperId);
+    if (!paper) return;
+    const records = (await Promise.all(paper.question_ids.map((id) => this.getQuestion(id)))).filter(Boolean);
+    const assets = [...records.flatMap((q) => [q.snapshot_asset, ...(q.figures || []).map((f) => f.image_asset)]), ...paper.source_assets].filter(Boolean);
+    await this.write([
+      { table: 'questions', remove: paper.question_ids },
+      { table: 'papers', remove: [paperId] },
+      { table: 'assets', remove: assets },
+    ]);
+  },
+  async assetBlob(id) {
+    const asset = id ? await this.driver.get('assets', id) : null;
+    return asset ? asset.blob : null;
+  },
+  async assetUrl(id) {
+    if (!id) return null;
+    if (assetUrls.has(id)) return assetUrls.get(id);
+    const blob = await this.assetBlob(id);
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    assetUrls.set(id, url);
+    return url;
+  },
+  async assetDataUrl(id) {
+    const blob = await this.assetBlob(id);
+    return blob ? readDataUrl(blob) : null;
+  },
+  async listSpecs() { return (await this.driver.getAll('specs')).sort((a, b) => b.version - a.version); },
+  putSpec(spec) { return this.write([{ table: 'specs', put: [spec] }]); },
+  listFeedback() { return this.driver.getAll('feedback'); },
+  addFeedback(item) {
+    return this.write([{ table: 'feedback', put: [{ id: `fb-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...item }] }]);
+  },
+  putFeedback(items) { return this.write([{ table: 'feedback', put: items }]); },
+  clearAll() { return this.write(Object.keys(BANK_TABLES).map((table) => ({ table, clear: true }))); },
+};
+bank.use(indexedDbDriver());
+
+const bankRows = () => bank.listQuestions();
+
+// 题库里的题：显示用的裁图链接。当前分析的题和旧测试数据直接带着图片。
+async function rowImage(row) {
+  if (row.snapshot) return row.snapshot;
+  return row.snapshot_asset ? bank.assetUrl(row.snapshot_asset) : null;
+}
+const hasImage = (row) => Boolean(row.snapshot || row.snapshot_asset);
+
+/* 当前试卷 → 题库记录。图片和原卷只在内容变了时才重写（自动保存很频繁）。 */
+function currentPaperId() {
+  return state.meta.file_sha256 || paperIdFromSource({ ...state.paper });
+}
+
+function currentPaperRecords() {
+  const paperId = currentPaperId();
+  const { subject, unit } = state.paper;
+  const assets = [];
+  const saved = state.savedAssets || (state.savedAssets = new Map());
+  const keep = (id, kind, owner, dataUrl) => {
+    if (!isDataUrl(dataUrl)) return null;
+    if (saved.get(id) !== dataUrl) assets.push({ ...makeAsset(id, kind, owner, dataUrlToBlob(dataUrl)), dataUrl });
+    return id;
+  };
+  const rows = exportRows(true);
+  const questions = rows.map((row, index) => {
+    const q = state.questions[index];
+    const id = row.source_id;
+    const record = {
+      ...row,
+      schema_version: RECORD_VERSION, paper_id: paperId, subject, unit,
+      page: q.page, adapted_from: q.adapted_from || null, marks_mismatch: !!q.marks_mismatch, math_problems: q.math_problems || [],
+      snapshot_asset: keep(`${id}#snapshot`, 'snapshot', id, row.snapshot),
+      figures: row.figures.map((figure, i) => {
+        const copy = { ...figure, image_asset: keep(`${id}#figure-${i}`, 'figure', id, figure.image) };
+        delete copy.image;
+        return copy;
+      }),
+      crop: q.crop_regions ? {
+        regions: q.crop_regions, auto: q.crop_auto, raw: !!q.crop_raw, heading: q.headingRatio || null,
+        flags_auto: (q.crop_flags_auto || []).map((flag) => flag.note),
+      } : null,
+    };
+    delete record.snapshot;
+    return record;
+  });
+  const sourceAssets = (state.sourceFiles || []).map((file, index) => `${paperId}#source-${index}`);
+  if (state.sourceSavedFor !== paperId) {
+    (state.sourceFiles || []).forEach((file, index) => assets.push(makeAsset(sourceAssets[index], 'source', paperId, file)));
+  }
+  const paper = {
+    schema_version: RECORD_VERSION, paper_id: paperId, subject, unit,
+    year: state.paper.year == null ? null : state.paper.year, publisher: state.paper.publisher || null,
+    paper_title: state.paper.paper_title || null, paper_type: state.paper.paper_type || null,
+    info: { ...state.paper }, file_name: state.meta.file || null, files: state.meta.files || [], file_type: state.sourceKind || null,
+    source_assets: sourceAssets,
+    crop: state.cropPages ? { pages: [...state.cropPages], page_marks: state.cropPageMarks || [] } : null,
+    meta: { ...state.meta }, question_ids: questions.map((q) => q.source_id),
+  };
+  return { paper, questions, assets };
+}
+
+// 重新分析题库里已有的试卷（比如算法升级后）：老师确认、改过的分类、标的难度、手动调整的裁图都沿用，
+// 不能被新的自动结果覆盖。手动裁图按原来的范围用新算法重新裁。返回沿用了修改的题数。
+async function carryOverTeacherWork() {
+  if (!state.paper) return 0;
+  let kept = 0;
+  for (const q of state.questions) {
+    let record = null;
+    try { record = await bank.getQuestion(sourceId(q)); } catch (e) { return kept; }
+    if (!record || record.generated) continue;
+    const teacherDifficulty = record.difficulty_source === 'teacher';
+    if (!(record.confirmed || record.edited || teacherDifficulty || record.crop_edited)) continue;
+    if (record.confirmed || record.edited) {
+      q.topic = record.topic;
+      q.question_type = record.question_type;
+    }
+    if (teacherDifficulty) {
+      q.difficulty = record.difficulty;
+      q.difficulty_source = 'teacher';
+    }
+    if (record.confirmed) q.confirmed = true;
+    if (record.crop_edited && record.crop && q.crop_regions && state.cropPages) {
+      try {
+        await applyRegions(q, record.crop.regions, !!record.crop.raw);
+        q.crop_edited = true;
+        q.crop_flags = [];
+      } catch (e) {
+        console.warn('沿用手动裁图失败，改用自动裁图', e);
+      }
+    }
+    kept += 1;
+  }
+  return kept;
+}
 
 // 同一题重新分析或修改后覆盖旧记录，题目 ID 由来源信息决定。
 async function saveBankNow() {
   if (!state.questions.length || !state.paper) return;
   try {
-    const { subject, unit } = state.paper;
-    const rows = exportRows(true).map((row) => ({ ...row, subject, unit, saved_at: new Date().toISOString() }));
-    await bankRequest('readwrite', (store) => {
-      let last;
-      rows.forEach((row) => { last = store.put(row); });
-      return last;
-    });
+    const { paper, questions, assets } = currentPaperRecords();
+    const removed = await bank.savePaper(paper, questions, assets.map(({ dataUrl, ...asset }) => asset));
+    assets.forEach((asset) => { if (asset.dataUrl) state.savedAssets.set(asset.id, asset.dataUrl); });
+    removed.forEach((id) => state.savedAssets.delete(id));
+    state.sourceSavedFor = paper.paper_id;
     await renderBank();
   } catch (e) {
     console.warn('题库保存失败', e);
@@ -7934,7 +8271,14 @@ async function renderBank() {
   const all = await bankRows();
   const rows = all.filter((row) => !row.generated);
   const approved = all.filter((row) => row.generated && row.status === 'approved').length;
-  $('bank').hidden = !rows.length;
+  // 题库是空的时候也要显示，才能导入。
+  $('bank').hidden = false;
+  if (!all.length) {
+    $('bankTitle').textContent = '题库：还没有题（可以导入之前导出的题库）';
+    $('bankBody').textContent = '';
+    $('bankPapers').textContent = '';
+    return;
+  }
   const papers = new Set(rows.map((row) => row.source.file_sha256 || row.source.paper_title));
   $('bankTitle').textContent = `题库：${papers.size} 份试卷，${rows.length} 道题${approved ? `，另有 AI 出的题 ${approved} 道（已通过）` : ''}`;
   const body = $('bankBody');
@@ -7954,22 +8298,228 @@ async function renderBank() {
     });
     body.append(table);
   });
+  await renderBankPapers();
 }
 
-async function exportBankJson() {
-  download('vce-question-bank.json', JSON.stringify(await bankRows(), null, 2), 'application/json');
+// 题库里的试卷：可以重新打开（继续审核、调整裁图），也可以单独删除。
+async function renderBankPapers() {
+  const host = $('bankPapers');
+  host.textContent = '';
+  const papers = (await bank.listPapers()).sort((a, b) => String(b.year || '').localeCompare(String(a.year || '')) || String(a.paper_title || '').localeCompare(String(b.paper_title || '')));
+  if (!papers.length) return;
+  const table = el('table', 'bank-table');
+  const header = el('tr');
+  [['试卷', ''], ['题数', 'num'], ['原卷', ''], ['', '']].forEach(([label, name]) => header.append(el('th', name, label)));
+  table.append(header);
+  papers.forEach((paper) => {
+    const row = el('tr');
+    const name = [paper.year, paper.publisher, paper.paper_title, paper.paper_type].filter((part) => part !== null && part !== undefined && part !== '').join(' ');
+    const actions = el('td', 'bank-actions');
+    const open = el('button', '', '打开');
+    open.type = 'button';
+    open.disabled = !paper.source_assets.length;
+    open.title = paper.source_assets.length ? '打开这份试卷，继续审核或调整裁图' : '旧版本入库的试卷没有保存原卷，请重新分析原卷文件';
+    open.addEventListener('click', () => openPaperFromBank(paper.paper_id));
+    const remove = el('button', '', '删除');
+    remove.type = 'button';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`删除“${name}”和它的 ${paper.question_ids.length} 道题？删除后不能恢复。`)) return;
+      await bank.deletePaper(paper.paper_id);
+      // 删的是当前打开的试卷：以后再保存要把图片和原卷全部重写。
+      if (state.paper && state.questions.length && currentPaperId() === paper.paper_id) {
+        state.savedAssets = new Map();
+        state.sourceSavedFor = null;
+      }
+      await renderBank();
+    });
+    actions.append(open, remove);
+    row.append(el('td', '', name || paper.file_name || paper.paper_id), el('td', 'num', String(paper.question_ids.length)),
+      el('td', '', paper.source_assets.length ? '已保存' : '没有'), actions);
+    table.append(row);
+  });
+  host.append(el('h4', '', '试卷'), table);
+}
+
+// 题库记录 → 页面上的题（重新打开试卷时用）。图片读成 data URL，导出和打印都能直接用。
+async function recordToQuestion(record) {
+  const crop = record.crop || null;
+  const flag = (note) => ({ type: 'saved', note });
+  return {
+    question_number: record.question_number, page: record.page == null ? null : record.page, adapted_from: record.adapted_from || null,
+    marks_mismatch: !!record.marks_mismatch, math_problems: record.math_problems || [],
+    section: record.section || null, area: record.area || null, text: record.text || '', sub_parts: record.sub_parts || [],
+    figures: await Promise.all((record.figures || []).map(async (figure, index) => ({
+      id: `saved-${record.question_number}-${index}`, page: figure.page, description: figure.description, sub_part: figure.sub_part,
+      box: figure.box_2d || null, status: figure.status, source: figure.source,
+      image: figure.image_asset ? await bank.assetDataUrl(figure.image_asset) : null,
+    }))),
+    marks: record.marks == null ? null : record.marks, topic: record.topic, topic_fit: record.topic_fit || 'split',
+    alternative_topics: record.alternative_topics || [], reason: record.reason || '', question_type: record.question_type,
+    difficulty: record.difficulty || '', difficulty_source: record.difficulty_source || '', facility: record.facility === null ? undefined : record.facility,
+    confidence: record.confidence == null ? 1 : record.confidence, confirmed: !!record.confirmed,
+    ai: record.ai_original || { topic: record.topic, question_type: record.question_type, difficulty: '' },
+    snapshot: record.snapshot_asset ? await bank.assetDataUrl(record.snapshot_asset) : null,
+    heading_box: record.heading_box || null,
+    crop_flags: (record.crop_flags || []).map(flag), crop_flags_auto: ((crop && crop.flags_auto) || []).map(flag),
+    crop_regions: crop ? crop.regions : null, crop_auto: crop ? crop.auto : null, crop_raw: !!(crop && crop.raw),
+    crop_edited: !!record.crop_edited, headingRatio: crop ? crop.heading : null,
+  };
+}
+
+async function openPaperFromBank(paperId) {
+  clearAlerts();
+  if (state.busy) return;
+  try {
+    const paper = await bank.getPaper(paperId);
+    if (!paper || !paper.source_assets.length) throw new UserError('打不开这份试卷', '旧版本入库的试卷没有保存原卷，请重新分析原卷文件。');
+    const blobs = await Promise.all(paper.source_assets.map((id) => bank.assetBlob(id)));
+    if (blobs.some((blob) => !blob)) throw new UserError('原卷文件缺失', '题库里这份试卷的原卷文件不完整，请重新分析原卷文件。');
+    const files = blobs.map((blob, index) => new File([blob], paper.files[index] || paper.file_name || `paper-${index + 1}`, { type: blob.type }));
+    const records = (await Promise.all(paper.question_ids.map((id) => bank.getQuestion(id)))).filter(Boolean);
+    state.file = files[0];
+    state.files = files;
+    state.queue = [];
+    state.taxonomy = validateTaxonomy() || state.taxonomy;
+    state.sourceFile = files[0];
+    state.sourceFiles = files;
+    state.sourceKind = paper.file_type || fileKind(files[0]);
+    if (state.pdf) state.pdf.destroy();
+    state.pdf = null;
+    pageCache.clear();
+    state.meta = { ...paper.meta, opened_from_bank: new Date().toISOString() };
+    state.paper = { ...(paper.info || {}), subject: paper.subject, unit: paper.unit, year: paper.year, publisher: paper.publisher, paper_title: paper.paper_title, paper_type: paper.paper_type };
+    state.cropPages = paper.crop ? new Map(paper.crop.pages) : null;
+    state.cropPageMarks = paper.crop ? paper.crop.page_marks : [];
+    state.questions = await Promise.all(records.map(recordToQuestion));
+    // 刚读出来的图片和原卷就是题库里的，自动保存时不用再写一遍。
+    state.savedAssets = new Map();
+    records.forEach((record, index) => {
+      const q = state.questions[index];
+      if (record.snapshot_asset && q.snapshot) state.savedAssets.set(record.snapshot_asset, q.snapshot);
+      (record.figures || []).forEach((figure, i) => { if (figure.image_asset && q.figures[i].image) state.savedAssets.set(figure.image_asset, q.figures[i].image); });
+    });
+    state.sourceSavedFor = paper.paper_id;
+    $('drop').classList.add('has-file');
+    $('dropText').textContent = `${paper.file_name || files[0].name}（从题库打开）`;
+    $('usage').hidden = true;
+    renderResult();
+    showAlert($('warning'), '已从题库打开', `${paper.question_ids.length} 道题。修改会自动存回题库，也可以调整裁图。`);
+    $('result').scrollIntoView({ block: 'start' });
+  } catch (e) {
+    showAlert($('error'), e.title || '打不开这份试卷', e.message || String(e));
+  }
+}
+
+// 整个题库打包成 ZIP：bank.json 是记录，assets/ 是图片和原卷。也是迁到 Wix 的通道。
+async function exportBankZip() {
+  if (!window.JSZip) {
+    showAlert($('warning'), '打包组件未加载', 'JSZip 没能从 CDN 加载，请检查网络后刷新页面。');
+    return;
+  }
+  download(`vce-question-bank-${new Date().toISOString().slice(0, 10)}.zip`, await buildBankZip(), 'application/zip');
+}
+
+async function buildBankZip() {
+  const [papers, questions, specs, feedback, assets] = await Promise.all(['papers', 'questions', 'specs', 'feedback', 'assets'].map((table) => bank.driver.getAll(table)));
+  const zip = new window.JSZip();
+  const files = assets.map((asset, index) => {
+    const extension = { 'image/jpeg': '.jpg', 'image/png': '.png', 'application/pdf': '.pdf' }[asset.mime] || '';
+    const file = `assets/${index}-${safeName(asset.id).slice(-80)}${extension}`;
+    zip.file(file, asset.blob);
+    return { id: asset.id, kind: asset.kind, owner: asset.owner, mime: asset.mime, size: asset.size, file };
+  });
+  zip.file('bank.json', JSON.stringify({
+    format: BANK_FORMAT, schema_version: RECORD_VERSION, exported_at: new Date().toISOString(),
+    papers, questions, specs, feedback, assets: files,
+  }, null, 1));
+  return zip.generateAsync({ type: 'blob' });
+}
+
+// 读入导出的题库，并按版本升级。支持完整题库 ZIP，也支持以前“导出题库 JSON”的旧文件。
+async function readBankFile(file) {
+  let data;
+  const blobs = new Map();
+  if (/\.zip$/i.test(file.name) || file.type === 'application/zip') {
+    if (!window.JSZip) throw new UserError('打包组件未加载', 'JSZip 没能从 CDN 加载，请检查网络后刷新页面。');
+    const zip = await window.JSZip.loadAsync(file);
+    const entry = zip.file('bank.json');
+    if (!entry) throw new UserError('不是题库文件', 'ZIP 里没有 bank.json。请选择“导出完整题库”得到的文件。');
+    data = JSON.parse(await entry.async('string'));
+    for (const asset of data.assets || []) {
+      const content = zip.file(asset.file);
+      if (content) blobs.set(asset.id, new Blob([await content.async('arraybuffer')], { type: asset.mime }));
+    }
+  } else {
+    data = JSON.parse(await file.text());
+  }
+  if (Array.isArray(data)) data = { format: BANK_FORMAT, schema_version: 1, questions: data }; // 旧的“导出题库 JSON”
+  if (!data || data.format !== BANK_FORMAT || !Array.isArray(data.questions)) throw new UserError('不是题库文件', '这个文件不是本工具导出的题库。');
+  if ((data.schema_version || 1) > RECORD_VERSION) throw new UserError('题库文件版本太新', '这个文件来自更新版本的工具，请先更新页面。');
+  const assets = (data.assets || []).filter((asset) => blobs.has(asset.id)).map((asset) => makeAsset(asset.id, asset.kind, asset.owner, blobs.get(asset.id)));
+  const questions = data.questions.map((row) => {
+    const upgraded = upgradeQuestion(row);
+    assets.push(...upgraded.assets);
+    return upgraded.record;
+  });
+  const papers = Array.isArray(data.papers) && data.papers.length ? data.papers : legacyPapers(questions);
+  return { papers, questions, assets, specs: data.specs || [], feedback: data.feedback || [] };
+}
+
+// 合并：同一份试卷、同一题以修改时间较新的为准；规范按版本号、审核意见按 ID 去重。
+async function mergeBank(incoming) {
+  const newer = (item, existing) => !existing || String(item.updated_at || '') >= String(existing.updated_at || '');
+  const papers = [];
+  const questions = [];
+  const skipped = { papers: 0, questions: 0 };
+  for (const paper of incoming.papers) {
+    if (newer(paper, await bank.getPaper(paper.paper_id))) papers.push(paper);
+    else skipped.papers += 1;
+  }
+  for (const question of incoming.questions) {
+    if (newer(question, await bank.getQuestion(question.source_id))) questions.push(question);
+    else skipped.questions += 1;
+  }
+  const accepted = new Set([...papers.map((p) => p.paper_id), ...questions.map((q) => q.source_id)]);
+  const assets = incoming.assets.filter((asset) => accepted.has(asset.owner));
+  const haveSpecs = new Set((await bank.listSpecs()).map((spec) => spec.version));
+  const specs = incoming.specs.filter((spec) => !haveSpecs.has(spec.version));
+  const haveFeedback = new Set((await bank.listFeedback()).map((item) => item.id));
+  const feedback = incoming.feedback.filter((item) => item.id !== undefined && !haveFeedback.has(item.id));
+  await bank.write([
+    { table: 'papers', put: papers }, { table: 'questions', put: questions }, { table: 'assets', put: assets },
+    { table: 'specs', put: specs }, { table: 'feedback', put: feedback },
+  ]);
+  return { papers: papers.length, questions: questions.length, assets: assets.length, specs: specs.length, feedback: feedback.length, skipped };
+}
+
+async function importBank() {
+  const file = $('bankImportFile').files[0];
+  $('bankImportFile').value = '';
+  if (!file) return;
+  clearAlerts();
+  try {
+    const result = await mergeBank(await readBankFile(file));
+    await renderBank();
+    $('bank').open = true;
+    const skipped = result.skipped.papers + result.skipped.questions;
+    showAlert($('warning'), '题库已导入', `导入试卷 ${result.papers} 份、题目 ${result.questions} 道、文件 ${result.assets} 个、出题规范 ${result.specs} 版、审核意见 ${result.feedback} 条。${skipped ? `另有 ${skipped} 条题库里已有更新的版本，没有覆盖。` : ''}`);
+  } catch (e) {
+    showAlert($('error'), e.title || '导入失败', e.message || String(e));
+  }
 }
 
 async function exportBankCsv() {
   const header = ['source_id', 'source', 'subject', 'unit', 'year', 'section', 'question_number', 'marks', 'topic', 'alternative_topics', 'question_type', 'difficulty', 'confirmed', 'text'];
   const rows = (await bankRows()).map((q) => [q.source_id, q.source.label, q.subject, q.unit, q.source.year, q.section, q.question_number, q.marks,
-    q.topic, q.alternative_topics.join('; '), q.question_type, q.difficulty, q.confirmed, q.text]);
+    q.topic, (q.alternative_topics || []).join('; '), q.question_type, q.difficulty, q.confirmed, q.text]);
   download('vce-question-bank.csv', '\ufeff' + [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 
 async function clearBank() {
-  if (!window.confirm('清空后题库里的题目和截图都会删除，不能恢复。确定清空吗？')) return;
-  await bankRequest('readwrite', (store) => store.clear());
+  if (!window.confirm('清空后题库里的试卷、题目、截图、原卷、出题规范和审核意见都会删除，不能恢复。建议先“导出完整题库”备份。确定清空吗？')) return;
+  await bank.clearAll();
+  state.savedAssets = new Map();
+  state.sourceSavedFor = null;
   await renderBank();
 }
 
@@ -8465,6 +9015,10 @@ async function analyzeCurrent() {
   if (state.pdf) state.pdf.destroy();
   state.pdf = null;
   pageCache.clear();
+  state.savedAssets = new Map();   // 新的一份试卷：图片和原卷都要重新存。
+  state.sourceSavedFor = null;
+  state.cropPages = null;
+  state.cropPageMarks = [];
   state.meta = {
     file: state.files.length > 1 ? `${state.file.name} 等 ${state.files.length} 张` : state.file.name,
     files: state.files.map((file) => file.name),
@@ -8500,9 +9054,11 @@ async function analyzeCurrent() {
     };
     state.meta.file_sha256 = await fileSha256(new Blob(state.sourceFiles));
     state.questions = prepareQuestions(result.questions, taxonomy, result.paper.subject);
+    const kept = await carryOverTeacherWork();
     renderUsage(result.usage, elapsed);
     renderResult();
     classified = true;
+    if (kept) showAlert($('warning'), '保留了老师之前的修改', `这份试卷题库里已有，${kept} 道题沿用了之前确认或修改过的知识点、题型和难度。`);
     if (state.docxNote) showAlert($('warning'), 'Word 文档有部分内容读不到', state.docxNote);
 
     // 分类结果先展示出来，再单独计时定位图片；定位失败不影响已有结果。
@@ -9019,7 +9575,9 @@ function init() {
   $('priceIn').addEventListener('input', renderCost);
   $('priceOut').addEventListener('input', renderCost);
   $('exportJson').addEventListener('click', exportJson);
-  $('bankJson').addEventListener('click', exportBankJson);
+  $('bankJson').addEventListener('click', () => exportBankZip().catch((e) => showAlert($('error'), '导出失败', e.message || String(e))));
+  $('bankImport').addEventListener('click', () => $('bankImportFile').click());
+  $('bankImportFile').addEventListener('change', importBank);
   $('tabAnalysis').addEventListener('click', () => showView('analysis'));
   $('tabPaper').addEventListener('click', () => showView('paper'));
   PAPER_DURATIONS.forEach((minutes) => $('pMinutes').append(new Option(`${minutes} 分钟`, String(minutes))));
