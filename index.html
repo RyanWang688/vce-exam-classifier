@@ -1566,7 +1566,7 @@ const QUESTION_LINE = /^Question\s+(\d+)\b(?![,;:])(?!.*\bcontin)\s*(.*)$/i; // 
 const PART_HEADING = /^Part\s+([A-Z])\s*[:|]\s*(.*)$/;
 const SECTION_LINE = /^SECTION\s*([A-Z0-9])\b(?!.*\bcontin)/i;
 const END_LINE = /^End of (?:examination|question|multiple|section|paper|book)/i;
-const NOISE_LINE = /(?:do not write|^\d{4}\s+VCE\b|\b\d{4}\s+VCE\b.*\bExamination\b|^\d{4}\s+[A-Z]+\s+EXAM\b|continues on the next page|^Part\s+[A-Z]:?\s*contin|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^page\s+\d+\s+of\b|^copyright|^©|^\d+$|turn over|^end$)/i;
+const NOISE_LINE = /(?:do not write|^\d{4}\s+VCE\b|\b\d{4}\s+VCE\b.*\bExamination\b|^\d{4}\s+[A-Z]+\s+EXAM\b|continues on the next page|^continues? (?:over|on) (?:the )?(?:next )?page\.?$|^Part\s+[A-Z]:?\s*contin|^SECTION\b.*contin|[–—-]\s*contin\w*\s*$|\bpage \d+ of \d+\b|^page\s+\d+\s+of\b|^copyright|^©|^\d+$|turn over|^end$|^this page (?:is )?(?:intentionally )?(?:left )?blank\.?$)/i;
 // 多道题共用一段材料：“Use the following information to answer Questions 1 and 2.”
 const SHARED_LINE = /^(?:Use the|The) following\b.*\bQuestions?\s+(\S+?)(?:\s*(?:and|to|,|[-–—])\s*(\S+?))?[.\s]*$/i;
 const MARKS_ONLY = /^(\d+)\s+marks?$/i;
@@ -1623,13 +1623,28 @@ function withoutSideBars(canvas) {
     }
     return ink;
   };
+  // 一列里最长的连续墨迹（按每 3 行取样）。页框是一整条线；文字的左边缘虽然也在同一列，但每行之间是断开的。
+  const longestRun = (x, limit) => {
+    let best = 0;
+    let run = 0;
+    for (let y = 0; y < height; y += 3) {
+      const i = (y * width + x) * 4;
+      if (data[i] + data[i + 1] + data[i + 2] < limit) {
+        run += 1;
+        if (run > best) best = run;
+      } else {
+        run = 0;
+      }
+    }
+    return best;
+  };
   const scan = (from, step, mark) => {
     let run = 0;
     let outside = 0;
     for (let x = from, n = 0; n < band; x += step, n++) {
       const solid = isBar(x);
       // 有的卷子正文外有一圈灰色细框，颜色浅，缩小后更浅，但几乎贯穿整页。
-      if (solid || columnInk(x, 690) / (height / 3) > 0.6) {
+      if (solid || longestRun(x, 690) / (height / 3) > 0.5) {
         run = solid ? run + 1 : 0;
         if (run >= thick || outside <= inkLimit) {
           mark(x);
@@ -1646,15 +1661,47 @@ function withoutSideBars(canvas) {
   let right = width;
   scan(width - 1, -1, (x) => { right = x; });
   if (!left && right === width) return canvas;
+  // 缩小图上一个像素约等于原图两个像素，竖条边缘离正文又很近。回到原图找竖条的准确边缘，只涂到边缘外 2 像素。
+  const full = canvas.getContext('2d', { willReadFrequently: true });
+  const edgeAt = (guess, step) => {
+    const from = Math.max(0, Math.min(canvas.width - 1, Math.round(guess / scale - 6 / scale * step)));
+    const to = Math.max(0, Math.min(canvas.width - 1, Math.round(guess / scale + 6 / scale * step)));
+    const x0 = Math.min(from, to);
+    const span = Math.abs(to - from) + 1;
+    const strip = full.getImageData(x0, 0, span, canvas.height).data;
+    // 从竖条一侧往外数，遇到第一列不像竖条的就停。隔着空白的表格竖线不算竖条。
+    const barLike = (x) => {
+      let ink = 0;
+      for (let y = 0; y < canvas.height; y += 4) {
+        const i = (y * span + x) * 4;
+        if (strip[i] + strip[i + 1] + strip[i + 2] < 690) ink += 1;
+      }
+      return ink / (canvas.height / 4) > 0.3;
+    };
+    // from 在竖条里面，to 在竖条外面。
+    let edge = Math.round(guess / scale) - step;
+    let seen = false;
+    for (let x = from; step > 0 ? x <= to : x >= to; x += step) {
+      if (barLike(x - x0)) {
+        edge = x;
+        seen = true;
+      } else if (seen) {
+        break;
+      }
+    }
+    return edge;
+  };
   const copy = document.createElement('canvas');
   copy.width = canvas.width;
   copy.height = canvas.height;
   const output = copy.getContext('2d');
   output.drawImage(canvas, 0, 0);
   output.fillStyle = '#fff';
-  const pad = 4 / scale;
-  if (left) output.fillRect(0, 0, left / scale + pad, canvas.height);
-  if (right < width) output.fillRect(right / scale - pad, 0, canvas.width, canvas.height);
+  if (left) output.fillRect(0, 0, edgeAt(left, 1) + 2, canvas.height);
+  if (right < width) {
+    const edge = edgeAt(right, -1);
+    output.fillRect(edge - 1, 0, canvas.width - edge + 1, canvas.height);
+  }
   return copy;
 }
 
@@ -4381,9 +4428,10 @@ function parseQuestions(rows) {
       continue;
     }
     const partHeading = usesParts ? PART_HEADING.exec(text) : null;
-    const heading = QUESTION_LINE.exec(text) || (partHeading ? [text, partHeading[1], partHeading[2]] : null) || (row.ocr ? ocrQuestionHeading(text, question) : null);
+    let heading = QUESTION_LINE.exec(text) || (partHeading ? [text, partHeading[1], partHeading[2]] : null) || (row.ocr ? ocrQuestionHeading(text, question) : null);
     // OCR 读错的页眉不能算新题：题号必须往后走，或者带着分值。
-    if (heading && row.ocr && question && question.section === section && Number(heading[1]) <= Number(question.question_number) && !/mark/i.test(text)) continue;
+    // 这样的行可能是题目里的表格（比如表头 “Question 1 2 3 4 5”），留在当前题里，不能当噪声涂掉。
+    if (heading && row.ocr && question && question.section === section && Number(heading[1]) <= Number(question.question_number) && !/mark/i.test(text)) heading = null;
     // 同一个 Part 的续页小标题不是新题，文字留在题干里。
     if (partHeading && question && question.question_number === partHeading[1]) {
       addLine(partHeading[2]);
@@ -4699,6 +4747,15 @@ function regionBounds(questions, pages) {
       const nextOwn = next && next.regions.find((item) => !item.shared);
       const sameNext = nextOwn && nextOwn.page === region.page ? nextOwn.top : null;
       region.topRatio = Math.max(0, (region.top - 6) / page.height);
+      // 续页从这一页第一行文字开始算会漏掉文字上方的表格线和图形。往上扩到页眉（或上方最近一行别的内容）的下面。
+      // 只算真正的续页：上一段是这道题自己的内容，在前面的页上。共用材料后面的那一段是题目本身的开头，不往上扩。
+      const previousRegion = q.regions[i - 1];
+      if (previousRegion && !previousRegion.shared && !region.shared && previousRegion.page < region.page) {
+        const above = [...(page.allRows || []), ...((page.allRows || {}).pageNumbers || [])]
+          .filter((row) => row.owner !== q && row.bottom !== undefined && row.bottom <= region.top + 1)
+          .reduce((low, row) => Math.max(low, row.bottom), 0);
+        region.topRatio = Math.max(0, Math.min(region.topRatio, (above + 3) / page.height));
+      }
       region.bottomRatio = (!nextRegion && sameNext !== null ? sameNext - 4 : page.height * 0.95) / page.height;
       region.cutBottom = (!nextRegion && sameNext !== null ? sameNext - 2 : page.height) / page.height;
       if (region.shared || (region.end !== null && region.end !== undefined)) {
@@ -4708,7 +4765,9 @@ function regionBounds(questions, pages) {
       }
       // 不属于任何题的行：页眉、页脚、续页提示、Section 标题、说明文字、答题横线。切图时涂掉。
       // 纯数字的行在页边才是页码，页面中间的是图表刻度，不能涂掉。
-      const isTick = (row) => /^[\d\s.,]+$/.test(row.text) && row.top > page.height * 0.08 && row.top < page.height * 0.93;
+      // OCR 可能把数字读成公式（比如 \(\overrightarrow{1}\)），按转成文字后的结果判断。
+      const isNumber = (row) => /^[\d\s.,]+$/.test(row.text || '') || /^[\d\s.,]+$/.test(latexToPlain(row.text || '').trim());
+      const isTick = (row) => isNumber(row) && row.top > page.height * 0.08 && row.top < page.height * 0.93;
       // 这一页正文的左边距。续页可能只有缩进的小问，不能拿它自己的最左边当页边。
       region.ocrPage = (page.allRows || []).some((row) => row.ocr);
       region.wordRows = (page.allRows || []).filter((row) => row.owner && /[a-z]/i.test(latexToPlain(row.text)))
@@ -4717,11 +4776,30 @@ function regionBounds(questions, pages) {
       region.noise = [...(page.allRows || []).filter((row) => !row.owner && !isTick(row)), ...((page.allRows || {}).pageNumbers || [])]
         .map((row) => ({
           x0: row.left !== undefined ? row.left : row.x0, x1: row.right !== undefined ? row.right : row.x1,
-          y0: row.top, y1: row.bottom,
+          y0: row.top, y1: row.bottom, text: row.text || '', digits: !!row.ocr && isNumber(row),
         }))
-        .map((box) => ({ left: box.x0 / page.width, right: box.x1 / page.width, top: box.y0 / page.height, bottom: box.y1 / page.height }));
+        .map((box) => ({ left: box.x0 / page.width, right: box.x1 / page.width, top: box.y0 / page.height, bottom: box.y1 / page.height, text: box.text, digits: box.digits }));
     });
   });
+}
+
+// 扫描件上 OCR 读出的纯数字：页码周围是空白；如果左右紧挨着还有墨迹，就是正文里的数字（比如分母 15 的 “1”），不能涂。
+function noiseBoxApplies(canvas, box) {
+  if (!box.digits) return true;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const top = Math.max(0, Math.floor(box.top * canvas.height));
+  const bottom = Math.min(canvas.height, Math.ceil(box.bottom * canvas.height));
+  const reach = Math.max(6, Math.round((bottom - top) * 1.5));
+  const sides = [
+    [Math.max(0, Math.floor(box.left * canvas.width) - reach), Math.max(0, Math.floor(box.left * canvas.width) - 2)],
+    [Math.min(canvas.width, Math.ceil(box.right * canvas.width) + 2), Math.min(canvas.width, Math.ceil(box.right * canvas.width) + reach)],
+  ];
+  for (const [x0, x1] of sides) {
+    if (x1 <= x0 || bottom <= top) continue;
+    const { data } = context.getImageData(x0, top, x1 - x0, bottom - top);
+    for (let i = 0; i < data.length; i += 4) if (data[i] + data[i + 1] + data[i + 2] < 480) return false;
+  }
+  return true;
 }
 
 const SNAPSHOT_GAP_PX = 14;   // 删掉空白后，段落之间留这么高。
@@ -4957,7 +5035,7 @@ async function cutQuestion(regions, pageMarks, heading) {
     const context = piece.getContext('2d', { willReadFrequently: true });
     context.drawImage(clean, 0, y, clean.width, h, 0, 0, clean.width, h);
     context.fillStyle = '#fff';
-    (region.noise || []).forEach((box) => {
+    (region.noise || []).filter((box) => noiseBoxApplies(clean, box)).forEach((box) => {
       context.fillRect(box.left * clean.width - 6, box.top * clean.height - y - 3,
         (box.right - box.left) * clean.width + 12, (box.bottom - box.top) * clean.height + 6);
     });
@@ -5044,11 +5122,202 @@ function fitFigureToLabels(block, rects, width, height) {
   return fit;
 }
 
+
+/* ---------- 切题对账 ---------- */
+// 每页上的墨迹要么进了某道题的裁图，要么是已知可以去掉的东西（页眉页脚、页码、Section 标题、说明文字）。
+// 对不上的就是漏掉的内容；两道题的范围重叠是重复；去侧边竖条时涂掉了文字是误涂。查出来的题标为“裁图请看一眼”。
+const AUDIT_WIDTH = 600;          // 对账用的分辨率（宽度像素）。
+const AUDIT_MIN_INK = 30;         // 少于这么多墨迹像素的一团当作噪点，不算漏掉的内容。
+
+function auditMask(canvas) {
+  const scale = AUDIT_WIDTH / canvas.width;
+  const small = document.createElement('canvas');
+  small.width = AUDIT_WIDTH;
+  small.height = Math.round(canvas.height * scale);
+  const context = small.getContext('2d', { willReadFrequently: true });
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, small.width, small.height);
+  context.drawImage(canvas, 0, 0, small.width, small.height);
+  const { data } = context.getImageData(0, 0, small.width, small.height);
+  const mask = new Uint8Array(small.width * small.height);
+  for (let i = 0; i < mask.length; i++) mask[i] = data[i * 4] + data[i * 4 + 1] + data[i * 4 + 2] < 480 ? 1 : 0;
+  return { mask, width: small.width, height: small.height };
+}
+
+async function auditCrops(questions, pageMarks) {
+  const byPage = new Map();
+  questions.forEach((q) => {
+    q.crop_flags = [];
+    q.regions.forEach((region) => {
+      if (!byPage.has(region.page)) byPage.set(region.page, []);
+      byPage.get(region.page).push({ q, region });
+    });
+  });
+  const report = [];
+  for (const [page, items] of byPage) {
+    const original = await getPageCanvas(page);
+    const clean = withoutSideBars(original);
+    const before = auditMask(original);
+    const after = auditMask(clean);
+    const { width, height } = after;
+    const at = (x, y) => y * width + x;
+
+    const covered = new Uint8Array(height);
+    items.forEach(({ region }) => {
+      for (let y = Math.max(0, Math.floor(region.topRatio * height)); y < Math.min(height, Math.ceil(region.cutBottom * height)); y++) covered[y] = 1;
+    });
+    const explained = new Uint8Array(width * height);
+    // 这些框里的墨迹都算“已知可以去掉的东西”；但只有真正会被涂掉的才算误擦（见第 4 项）。
+    const boxes = [...(items[0].region.noise || []), ...(items[0].region.ocrPage ? pageMarks : [])];
+    boxes.forEach((box) => {
+      const x0 = Math.max(0, Math.floor(box.left * width) - 4);
+      const x1 = Math.min(width, Math.ceil(box.right * width) + 4);
+      const y0 = Math.max(0, Math.floor(box.top * height) - 2);
+      const y1 = Math.min(height, Math.ceil(box.bottom * height) + 2);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) explained[at(x, y)] = 1;
+    });
+
+    // 1. 误涂：去侧边竖条时涂掉的墨迹。竖条本身（几乎整列都是墨迹的列）、页眉页脚里的字、
+    //    碰到竖条的长横线末端（答题线、表格线）都不算。
+    // 缩小后竖条边缘会变成半灰，看起来像被涂掉的墨迹，所以这一项在原分辨率下比较，只看左右两侧。
+    if (clean !== original) {
+      const longLine = new Uint8Array(height);
+      for (let y = 0; y < height; y++) {
+        let run = 0;
+        for (let x = 0; x < width; x++) {
+          run = before.mask[at(x, y)] ? run + 1 : 0;
+          if (run >= width * 0.22) { longLine[y] = 1; break; }
+        }
+      }
+      const fullWidth = original.width;
+      const fullHeight = original.height;
+      const side = Math.round(fullWidth * 0.2);
+      const cleanCopy = document.createElement('canvas');
+      cleanCopy.width = fullWidth;
+      cleanCopy.height = fullHeight;
+      cleanCopy.getContext('2d').drawImage(clean, 0, 0);
+      const sx = width / fullWidth;
+      const sy = height / fullHeight;
+      let erased = 0;
+      for (const x0 of [0, fullWidth - side]) {
+        const a = original.getContext('2d', { willReadFrequently: true }).getImageData(x0, 0, side, fullHeight).data;
+        const b = cleanCopy.getContext('2d', { willReadFrequently: true }).getImageData(x0, 0, side, fullHeight).data;
+        const dark = (data, x, y) => {
+          const i = (y * side + x) * 4;
+          return data[i] + data[i + 1] + data[i + 2] < 480;
+        };
+        // 竖条和页框所在的列；紧贴它们的两列是线的边缘（线可能有两三个像素粗），也不算。
+        const barColumn = new Uint8Array(side);
+        for (let x = 0; x < side; x++) {
+          let column = 0;
+          for (let y = 0; y < fullHeight; y += 2) if (dark(a, x, y)) column += 1;
+          barColumn[x] = column > fullHeight / 2 * 0.35 ? 1 : 0;
+        }
+        for (let x = 0; x < side; x++) {
+          if (barColumn[x] || barColumn[x - 1] || barColumn[x + 1] || barColumn[x - 2] || barColumn[x + 2]) continue;
+          for (let y = 0; y < fullHeight; y++) {
+            if (!dark(a, x, y) || dark(b, x, y)) continue;
+            const ax = Math.min(width - 1, Math.floor((x0 + x) * sx));
+            const ay = Math.min(height - 1, Math.floor(y * sy));
+            if (!explained[at(ax, ay)] && covered[ay] && !longLine[ay]) erased += 1;
+          }
+        }
+      }
+      // 原分辨率下一个字母的笔画也有一两百个像素，噪点远少于这个数。
+      if (erased > 150) {
+        items.forEach(({ q }) => q.crop_flags.push({ type: 'bar', page, note: `第 ${page} 页去侧边竖条时可能涂掉了内容` }));
+        report.push({ page, type: 'bar', erased });
+      }
+    }
+
+    // 2. 漏掉：不在任何一道题范围里、也不在已知可去掉的行里的墨迹。
+    const rowInk = new Uint32Array(height);
+    const rowLongest = new Uint32Array(height);
+    for (let y = 0; y < height; y++) {
+      if (covered[y]) continue;
+      let run = 0;
+      for (let x = 0; x < width; x++) {
+        if (after.mask[at(x, y)] && !explained[at(x, y)]) {
+          rowInk[y] += 1;
+          run += 1;
+          if (run > rowLongest[y]) rowLongest[y] = run;
+        } else {
+          run = 0;
+        }
+      }
+    }
+    let start = -1;
+    let ink = 0;
+    let ruleOnly = true;
+    const flush = (end) => {
+      // 只有长横线（分隔线、答题线）的一段不算内容。
+      if (start >= 0 && ink >= AUDIT_MIN_INK && !ruleOnly) {
+        const top = start / height;
+        const bottom = end / height;
+        const nearest = items.reduce((best, item) => {
+          const distance = Math.min(Math.abs(item.region.topRatio - bottom), Math.abs(item.region.cutBottom - top));
+          return !best || distance < best.distance ? { item, distance } : best;
+        }, null);
+        nearest.item.q.crop_flags.push({ type: 'orphan', page, top, bottom, note: `第 ${page} 页有一段内容不在任何一道题的裁图里` });
+        report.push({ page, type: 'orphan', top, bottom, ink, question: nearest.item.q.question_number });
+      }
+      start = -1;
+      ink = 0;
+      ruleOnly = true;
+    };
+    // 相隔不超过 3 行的墨迹算同一团。
+    let last = -1;
+    for (let y = 0; y < height; y++) {
+      if (!rowInk[y]) {
+        if (start >= 0 && y - last > 3) flush(last + 1);
+        continue;
+      }
+      if (start < 0) start = y;
+      last = y;
+      ink += rowInk[y];
+      const isRule = rowLongest[y] >= width * 0.22 && rowInk[y] <= rowLongest[y] * 1.15;
+      if (!isRule) ruleOnly = false;
+    }
+    if (start >= 0) flush(last + 1);
+
+    // 记下裁图范围里被当作页眉页脚涂掉的文字，供人工核对有没有误涂（不算问题，不标出）。
+    const erasedBoxes = boxes.filter((box) => box.text && noiseBoxApplies(clean, box) && covered[Math.min(height - 1, Math.floor((box.top + box.bottom) / 2 * height))]);
+    const erasedTexts = erasedBoxes.map((box) => box.text);
+    if (erasedTexts.length) report.push({ page, type: 'note', texts: erasedTexts });
+    // 4. 误擦：裁图范围中间被当噪声擦掉的文字，既不像页眉页脚和续页提示，也不是答题横线，可能是题目内容。
+    erasedBoxes.forEach((box) => {
+      const plain = latexToPlain(box.text).trim();
+      const middle = (box.top + box.bottom) / 2;
+      if (middle < 0.07 || middle > 0.93 || /^[_\s.]+$/.test(plain) || NOISE_LINE.test(box.text) || NOISE_LINE.test(plain)) return;
+      const owner = items.find(({ region }) => middle >= region.topRatio && middle <= region.cutBottom) || items[0];
+      owner.q.crop_flags.push({ type: 'erased', page, note: `第 ${page} 页裁图里有一行被当作页眉页脚擦掉了：${plain.slice(0, 40)}` });
+      report.push({ page, type: 'erased', text: plain.slice(0, 60), question: owner.q.question_number });
+    });
+
+    // 3. 重复：两道题的范围重叠（共用材料是有意放进每道题的，不算）。
+    const own = items.filter(({ region }) => !region.shared);
+    for (let i = 0; i < own.length; i++) {
+      for (let j = i + 1; j < own.length; j++) {
+        const a = own[i];
+        const b = own[j];
+        if (a.q === b.q) continue;
+        const overlap = Math.min(a.region.cutBottom, b.region.cutBottom) - Math.max(a.region.topRatio, b.region.topRatio);
+        if (overlap > 0.02) {
+          [a, b].forEach(({ q }) => q.crop_flags.push({ type: 'overlap', page, note: `第 ${page} 页和另一道题的裁图范围重叠` }));
+          report.push({ page, type: 'overlap', a: a.q.question_number, b: b.q.question_number });
+        }
+      }
+    }
+  }
+  return report;
+}
+
 async function attachPdfImages(questions, onProgress) {
   const inkCache = new Map();
   const wordRowsByPage = new Map();
   questions.forEach((q) => q.regions.filter((region) => region.ocrPage).forEach((region) => wordRowsByPage.set(region.page, region.wordRows)));
   const pageMarks = await repeatedPageMarks([...wordRowsByPage.keys()], wordRowsByPage);
+  state.meta.crop_audit = await auditCrops(questions, pageMarks);
   for (let index = 0; index < questions.length; index++) {
     const q = questions[index];
     onProgress(index + 1, questions.length);
@@ -6932,6 +7201,7 @@ async function runRules(taxonomy, started) {
       q.figures = questions[index].figures;
       q.snapshot = questions[index].snapshot;
       q.heading_box = questions[index].heading_box;
+      q.crop_flags = questions[index].crop_flags || [];
       q.area = questions[index].area;
     });
   }
@@ -7468,6 +7738,7 @@ function reviewReasons(q) {
   if (q.confidence < LOW_CONFIDENCE) reasons.push('题目内容可能没读准');
   if (q.marks_mismatch) reasons.push('小问分值之和与总分不一致，切题可能有误');
   if ((q.math_problems || []).length) reasons.push(`公式请对照截图：${q.math_problems.join('、')}`);
+  if ((q.crop_flags || []).length) reasons.push(`裁图请看一眼：${[...new Set(q.crop_flags.map((flag) => flag.note))].join('；')}`);
   return reasons;
 }
 
@@ -8347,6 +8618,7 @@ function exportRows(embed = true) {
     figures: exportFigures(q, embed),
     ...(q.snapshot ? (embed ? { snapshot: q.snapshot } : { snapshot_file: `snapshots/${figureFile({ ...q, figures: [{ image: q.snapshot }] }, 0)}` }) : {}),
     heading_box: q.heading_box || null,
+    crop_flags: (q.crop_flags || []).map((flag) => flag.note),
     marks: q.marks,
     topic: q.topic,
     topic_fit: q.topic_fit,

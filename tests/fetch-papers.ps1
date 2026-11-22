@@ -16,6 +16,8 @@ $files = [ordered]@{
   '2025SM2.pdf'             = '2025-11/2025-SpecialistMaths2.pdf'
   '2025MM2.pdf'             = '2025-11/2025-MathMethods2.pdf'
   '2025GM2.pdf'             = '2025-11/2025-GeneralMaths2.pdf'
+  '2025MM1.pdf'             = '2025-11/2025-MathMethods1.pdf'
+  '2023genmath2-w.pdf'      = 'Documents/exams/mathematics/2023/2023genmath2-w.pdf'
 }
 foreach ($name in $files.Keys) {
   $out = Join-Path $target $name

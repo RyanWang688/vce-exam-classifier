@@ -62,6 +62,8 @@
     { file: '2024MM1-w.pdf', note: '扫描件：封面勘误 “Question 6, ...” 不是题；页码被 OCR 读坏的页眉要去掉', total: [8, 40], checks: [{ n: 2, lacks: ['Examination'] }, { n: 4, lacks: ['Examination'] }, { n: 6, lacks: ['Examination'] }] },
     { file: '2023genmath1-w.pdf', note: '多题共用材料要进每道相关题；页面有灰色细框', total: [40, 40], checks: [{ n: 8, has: ['Use the following information to answer Questions 7 and 8'], topic: 'Investigating and modelling linear associations' }] },
     { file: '2024GeneralMaths1-w.pdf', note: '扫描件：结束标记读坏，最后一题不能带上版权行和公式表', scan: true, total: [40, 40], checks: [{ n: 40, lacks: ['Formula', 'Victorian'] }] },
+    { file: '2025MM1.pdf', note: '空白页提示 “This page is blank.” 不能进上一题的裁图', total: [9, 40], checks: [{ n: 8, lacks: ['This page is blank'] }] },
+    { file: '2023genmath2-w.pdf', note: '大写续页提示 “CONTINUES OVER PAGE” 不能进裁图', total: [14, 60], checks: [{ n: 11, lacks: ['CONTINUES OVER PAGE'] }, { n: 13, lacks: ['CONTINUES OVER PAGE'] }] },
     { file: '2023specmath1-w.pdf', note: '波浪号向量、AB 箭头、导数点', total: [10, 40], checks: [{ n: 9, has: ['\\overrightarrow{AB}', '\\underset{\\sim}{\\mathrm{i}}'] }, { n: 10, has: ['\\dot{\\underset{\\sim}{\\mathrm{r}}}'] }] },
     { file: '2023MM2-w.pdf', note: 'π、括号、逗号是轮廓图形；小问 i、j 接在 h 后面；lim 下方条件', total: [25, 80], checks: [{ s: 'B', n: 3, has: ['\\lim_{x\\to-\\infty}'] }] },
     { file: '2024MM2-nht-w.pdf', note: '相邻选项的括号不能连成矩阵', total: [25, 80], checks: [{ s: 'A', n: 20, lacks: ['\\begin{bmatrix}'] }] },
@@ -93,6 +95,11 @@
     if (list.length !== item.total[0] || marks !== item.total[1]) failures.push(`总数：${list.length} 题 ${marks} 分，应为 ${item.total.join(' 题 ')} 分`);
     // 切题截图：PDF 的每道题都要有。Word 没有页面，继续用文字。
     if (item.file.endsWith('.pdf') && list.some((q) => !q.snapshot)) failures.push('有题没有切题截图');
+    // 切题对账：没有漏掉的内容、没有两题重叠、去侧边竖条没有涂掉内容。
+    if (item.file.endsWith('.pdf')) {
+      const flags = (state.meta.crop_audit || []).filter((entry) => entry.type !== 'note');
+      if (flags.length) failures.push(`裁图对账有 ${flags.length} 处可疑：${flags.map((f) => `${f.type}@p${f.page}`).join('、')}`);
+    }
     // VCAA 试卷的题号行都要记下位置，组卷时才能换成新题号。校内卷的 “Part A | 标题” 不换。
     if (/^20\d\d/.test(item.file)) {
       const missing = list.filter((q) => !q.heading_box).map((q) => `${(q.section || '').slice(-1)}${q.question_number}`);
