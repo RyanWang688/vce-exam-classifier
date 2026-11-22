@@ -249,6 +249,18 @@
   .crop-wrap { position: relative; touch-action: none; user-select: none; cursor: crosshair; box-shadow: 0 0 0 1px var(--line-strong); }
   .crop-wrap canvas { display: block; width: 100%; height: auto; }
   .crop-box { position: absolute; pointer-events: none; border: 2px solid var(--accent); background: rgba(15, 110, 110, .15); }
+  .region-block { margin-bottom: 16px; }
+  .region-block-head { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; font-size: 13px; }
+  .region-wrap { position: relative; touch-action: none; user-select: none; cursor: ns-resize; box-shadow: 0 0 0 1px var(--line-strong); }
+  .region-wrap canvas { display: block; width: 100%; height: auto; }
+  .region-shade { position: absolute; left: 0; right: 0; background: rgba(15, 25, 35, .45); pointer-events: none; }
+  .region-edge { position: absolute; left: 0; right: 0; height: 0; border-top: 3px solid var(--accent); outline: none; }
+  .region-edge::after { content: attr(data-label); position: absolute; right: 6px; top: -12px; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: #fff; font-size: 12px; }
+  .region-edge:focus-visible { border-top-color: #e08a00; }
+  .region-edge:focus-visible::after { background: #e08a00; }
+  .region-raw { margin-right: auto; font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .crop-tools { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .tag.edited-crop { background: #e7f3f3; color: var(--accent); }
 
   [hidden] { display: none !important; }
   @media (max-width: 980px) {
@@ -551,6 +563,26 @@
   <div class="crop-foot">
     <button id="cropCancel" type="button">取消</button>
     <button id="cropSave" class="primary" type="button" disabled>确认截图</button>
+  </div>
+</dialog>
+
+<dialog id="regionDialog" aria-labelledby="regionTitle">
+  <div class="crop-head">
+    <div>
+      <strong id="regionTitle">调整裁图</strong>
+      <span class="hint">拖动青色线调整上下边界，也可以选中线后按 ↑ ↓。跨页的题每页一段，按顺序拼起来。</span>
+    </div>
+    <div class="row">
+      <button id="regionAddBefore" type="button">前面加一页</button>
+      <button id="regionAddAfter" type="button">后面加一页</button>
+    </div>
+  </div>
+  <div class="crop-stage" id="regionStage"></div>
+  <div class="crop-foot">
+    <label class="region-raw"><input id="regionRaw" type="checkbox"> 不擦页眉页脚（题目内容被误擦时勾选）</label>
+    <button id="regionReset" type="button">还原自动裁图</button>
+    <button id="regionCancel" type="button">取消</button>
+    <button id="regionSave" class="primary" type="button">重新裁图</button>
   </div>
 </dialog>
 
@@ -5318,6 +5350,15 @@ async function attachPdfImages(questions, onProgress) {
   questions.forEach((q) => q.regions.filter((region) => region.ocrPage).forEach((region) => wordRowsByPage.set(region.page, region.wordRows)));
   const pageMarks = await repeatedPageMarks([...wordRowsByPage.keys()], wordRowsByPage);
   state.meta.crop_audit = await auditCrops(questions, pageMarks);
+  // 留着裁图范围，老师可以在页面上手动调整后重新裁（只限当前打开的这份试卷）。
+  state.cropPageMarks = pageMarks;
+  state.cropPages = new Map();
+  questions.forEach((q) => q.regions.forEach((region) => {
+    if (!state.cropPages.has(region.page)) state.cropPages.set(region.page, { noise: region.noise || [], ocrPage: !!region.ocrPage, pageLeft: region.pageLeft });
+  }));
+  questions.forEach((q) => {
+    q.crop_regions = q.regions.map((region) => ({ page: region.page, topRatio: region.topRatio, cutBottom: region.cutBottom, shared: !!region.shared }));
+  });
   for (let index = 0; index < questions.length; index++) {
     const q = questions[index];
     onProgress(index + 1, questions.length);
@@ -7202,6 +7243,11 @@ async function runRules(taxonomy, started) {
       q.snapshot = questions[index].snapshot;
       q.heading_box = questions[index].heading_box;
       q.crop_flags = questions[index].crop_flags || [];
+      q.crop_flags_auto = [...q.crop_flags];
+      q.headingRatio = questions[index].headingRatio || null; // 手动重新裁图时，也要能找到题号行的位置。
+      q.crop_regions = questions[index].crop_regions || null;
+      q.crop_auto = q.crop_regions ? q.crop_regions.map((region) => ({ ...region })) : null;
+      q.crop_edited = false;
       q.area = questions[index].area;
     });
   }
@@ -8061,11 +8107,24 @@ function renderCard(q) {
   card.append(head, sourceLine);
   // 有切题截图时页面只显示原卷截图。提取的文字留在后台，用于分类、题库和导出。
   const textHost = q.snapshot ? el('div') : card;
+  let image = null;
+  let editedTag = null;
   if (q.snapshot) {
-    const image = el('img', 'qshot');
+    image = el('img', 'qshot');
     image.src = q.snapshot;
     image.alt = `第 ${q.question_number} 题原卷截图`;
     card.append(image);
+    // 裁错了可以手动调整范围（只限当前打开的试卷，要用原卷页面重新裁）。
+    if (q.crop_regions) {
+      const tools = el('div', 'crop-tools');
+      const adjust = el('button', '', '调整裁图');
+      adjust.type = 'button';
+      adjust.addEventListener('click', () => openRegionEditor(q));
+      editedTag = el('span', 'tag edited-crop', '已手动调整裁图');
+      editedTag.hidden = !q.crop_edited;
+      tools.append(adjust, editedTag);
+      card.append(tools);
+    }
   }
   textHost.append(el('div', 'qtext', q.text));
 
@@ -8126,6 +8185,11 @@ function renderCard(q) {
     const origin = q.adapted_from ? ` · 改编自 ${q.adapted_from}` : '';
     sourceLine.textContent = `来源：${sourceLabel(q)}${page}${origin}`;
     sourceLine.title = `题目 ID：${sourceId(q)}`;
+  };
+  q.rerender = () => {
+    if (image) image.src = q.snapshot;
+    if (editedTag) editedTag.hidden = !q.crop_edited;
+    q.refresh();
   };
   q.refresh();
   renderMath(card);
@@ -8574,6 +8638,182 @@ function initCropper() {
   $('figUpload').addEventListener('change', saveUploadedFigure);
 }
 
+/* ---------- 手动调整裁图 ---------- */
+// 每段是某一页上的一个上下范围（占页高的比例），按顺序拼成这道题的裁图。只有当前打开的试卷能调整。
+const regionEdit = { q: null, regions: [], raw: false, drag: null };
+const REGION_MIN = 0.01;   // 一段至少占页高的 1%。
+const REGION_STEP = 0.003; // 方向键每次移动的距离。
+
+// 调整后的范围 → cutQuestion 要的格式：页眉页脚、页码等噪声按页取，勾了“不擦”就不涂。
+function regionsForCut(regions, raw) {
+  return regions.map((region) => {
+    const page = state.cropPages.get(region.page) || {};
+    const fallbackLeft = [...state.cropPages.values()].map((item) => item.pageLeft).find((left) => left !== undefined) || 0;
+    return {
+      page: region.page, topRatio: region.topRatio, cutBottom: region.cutBottom, shared: region.shared,
+      noise: raw ? [] : (page.noise || []), ocrPage: !raw && !!page.ocrPage,
+      pageLeft: page.pageLeft !== undefined ? page.pageLeft : fallbackLeft,
+    };
+  });
+}
+
+async function applyRegions(q, regions, raw) {
+  const cut = await cutQuestion(regionsForCut(regions, raw), raw ? [] : (state.cropPageMarks || []), q.headingRatio);
+  if (!cut) throw new UserError('裁图是空的', '选中的范围里没有内容，请把边界拉开一些。');
+  q.snapshot = cut.image;
+  q.heading_box = cut.headingBox;
+  q.crop_regions = regions.map((region) => ({ ...region }));
+  q.crop_raw = raw;
+}
+
+function drawRegionBlock(block, region) {
+  block.querySelector('.shade-top').style.height = `${region.topRatio * 100}%`;
+  block.querySelector('.shade-bottom').style.top = `${region.cutBottom * 100}%`;
+  block.querySelector('.edge-top').style.top = `${region.topRatio * 100}%`;
+  block.querySelector('.edge-bottom').style.top = `${region.cutBottom * 100}%`;
+  block.querySelector('.edge-top').setAttribute('aria-valuenow', Math.round(region.topRatio * 100));
+  block.querySelector('.edge-bottom').setAttribute('aria-valuenow', Math.round(region.cutBottom * 100));
+}
+
+function moveEdge(region, edge, value) {
+  const clamped = Math.min(1, Math.max(0, value));
+  if (edge === 'top') region.topRatio = Math.min(clamped, region.cutBottom - REGION_MIN);
+  else region.cutBottom = Math.max(clamped, region.topRatio + REGION_MIN);
+}
+
+async function renderRegionStage() {
+  const stage = $('regionStage');
+  stage.textContent = '';
+  const count = await pageCount();
+  const pages = regionEdit.regions.map((region) => region.page);
+  $('regionAddBefore').disabled = Math.min(...pages) <= 1;
+  $('regionAddAfter').disabled = Math.max(...pages) >= count;
+  for (let index = 0; index < regionEdit.regions.length; index++) {
+    const region = regionEdit.regions[index];
+    const source = await getPageCanvas(region.page);
+    const canvas = document.createElement('canvas'); // 页面缓存里的画布不能挪进对话框，复制一份。
+    canvas.width = source.width;
+    canvas.height = source.height;
+    canvas.getContext('2d').drawImage(source, 0, 0);
+    const block = el('div', 'region-block');
+    const head = el('div', 'region-block-head');
+    head.append(el('strong', '', `第 ${index + 1} 段 · 原卷第 ${region.page} 页${region.shared ? '（共用材料）' : ''}`));
+    if (regionEdit.regions.length > 1) {
+      const remove = el('button', '', '删掉这一段');
+      remove.type = 'button';
+      remove.addEventListener('click', () => {
+        regionEdit.regions.splice(index, 1);
+        renderRegionStage();
+      });
+      head.append(remove);
+    }
+    const wrap = el('div', 'region-wrap');
+    wrap.append(canvas, el('div', 'region-shade shade-top'), el('div', 'region-shade shade-bottom'));
+    wrap.querySelector('.shade-top').style.top = '0';
+    wrap.querySelector('.shade-bottom').style.bottom = '0';
+    ['top', 'bottom'].forEach((edge) => {
+      const line = el('div', `region-edge edge-${edge}`);
+      line.dataset.label = edge === 'top' ? '上边界' : '下边界';
+      line.tabIndex = 0;
+      line.setAttribute('role', 'slider');
+      line.setAttribute('aria-label', `第 ${index + 1} 段${line.dataset.label}`);
+      line.setAttribute('aria-valuemin', '0');
+      line.setAttribute('aria-valuemax', '100');
+      line.addEventListener('keydown', (event) => {
+        const step = { ArrowUp: -REGION_STEP, ArrowDown: REGION_STEP }[event.key];
+        if (!step) return;
+        event.preventDefault();
+        moveEdge(region, edge, (edge === 'top' ? region.topRatio : region.cutBottom) + step * (event.shiftKey ? 5 : 1));
+        drawRegionBlock(block, region);
+      });
+      wrap.append(line);
+    });
+    const ratioAt = (event) => {
+      const rect = wrap.getBoundingClientRect();
+      return (event.clientY - rect.top) / rect.height;
+    };
+    // 按下时离哪条线近就拖哪条。
+    wrap.addEventListener('pointerdown', (event) => {
+      const y = ratioAt(event);
+      const edge = Math.abs(y - region.topRatio) <= Math.abs(y - region.cutBottom) ? 'top' : 'bottom';
+      regionEdit.drag = { region, edge, block };
+      wrap.setPointerCapture(event.pointerId);
+      moveEdge(region, edge, y);
+      drawRegionBlock(block, region);
+      wrap.querySelector(`.edge-${edge}`).focus({ preventScroll: true });
+    });
+    wrap.addEventListener('pointermove', (event) => {
+      if (!regionEdit.drag || regionEdit.drag.region !== region) return;
+      moveEdge(region, regionEdit.drag.edge, ratioAt(event));
+      drawRegionBlock(block, region);
+    });
+    ['pointerup', 'pointercancel'].forEach((type) => wrap.addEventListener(type, () => { regionEdit.drag = null; }));
+    block.append(head, wrap);
+    stage.append(block);
+    drawRegionBlock(block, region);
+  }
+}
+
+async function openRegionEditor(q) {
+  if (!q.crop_regions || !state.cropPages) return;
+  regionEdit.q = q;
+  regionEdit.regions = q.crop_regions.map((region) => ({ ...region }));
+  regionEdit.raw = !!q.crop_raw;
+  $('regionRaw').checked = regionEdit.raw;
+  $('regionTitle').textContent = `调整第 ${q.question_number} 题裁图`;
+  try {
+    await renderRegionStage();
+    $('regionDialog').showModal();
+  } catch (e) {
+    showAlert($('warning'), e.title || '无法打开调整窗口', e.message, e.raw);
+  }
+}
+
+async function addRegionPage(before) {
+  const pages = regionEdit.regions.map((region) => region.page);
+  const page = before ? Math.min(...pages) - 1 : Math.max(...pages) + 1;
+  const region = { page, topRatio: 0.06, cutBottom: 0.94, shared: false };
+  if (before) regionEdit.regions.unshift(region);
+  else regionEdit.regions.push(region);
+  await renderRegionStage();
+}
+
+async function saveRegions() {
+  const q = regionEdit.q;
+  const button = $('regionSave');
+  button.disabled = true;
+  try {
+    const raw = $('regionRaw').checked;
+    await applyRegions(q, regionEdit.regions, raw);
+    const sameAsAuto = !raw && JSON.stringify(regionEdit.regions) === JSON.stringify(q.crop_auto);
+    q.crop_edited = !sameAsAuto;
+    q.crop_flags = sameAsAuto ? [...(q.crop_flags_auto || [])] : []; // 老师调整过就不再提示；还原后恢复自动对账的提示。
+    $('regionDialog').close();
+    q.rerender();
+    renderStats();
+  } catch (e) {
+    showAlert($('warning'), e.title || '重新裁图失败', e.message, e.raw);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function resetRegions() {
+  const q = regionEdit.q;
+  if (!q.crop_auto) return;
+  regionEdit.regions = q.crop_auto.map((region) => ({ ...region }));
+  $('regionRaw').checked = false;
+  await renderRegionStage();
+}
+
+function initRegionEditor() {
+  $('regionAddBefore').addEventListener('click', () => addRegionPage(true));
+  $('regionAddAfter').addEventListener('click', () => addRegionPage(false));
+  $('regionCancel').addEventListener('click', () => $('regionDialog').close());
+  $('regionReset').addEventListener('click', resetRegions);
+  $('regionSave').addEventListener('click', saveRegions);
+}
+
 /* ---------- 导出 ---------- */
 const safeName = (value) => String(value).replace(/[^\w.-]+/g, '_');
 function figureFile(q, index) {
@@ -8619,6 +8859,7 @@ function exportRows(embed = true) {
     ...(q.snapshot ? (embed ? { snapshot: q.snapshot } : { snapshot_file: `snapshots/${figureFile({ ...q, figures: [{ image: q.snapshot }] }, 0)}` }) : {}),
     heading_box: q.heading_box || null,
     crop_flags: (q.crop_flags || []).map((flag) => flag.note),
+    crop_edited: !!q.crop_edited,
     marks: q.marks,
     topic: q.topic,
     topic_fit: q.topic_fit,
@@ -8810,6 +9051,7 @@ function init() {
   $('onlyReview').addEventListener('change', (e) => $('cards').classList.toggle('review-only', e.target.checked));
   $('exportZip').addEventListener('click', exportZip);
   initCropper();
+  initRegionEditor();
 }
 
 init();
