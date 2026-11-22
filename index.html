@@ -6176,7 +6176,11 @@ Topic (VCAA Study Design): ${request.topic}.
 Target difficulty: ${DIFFICULTY_MEANING[request.difficulty] || 'medium'}.
 ${request.template ? 'Example 1 is the question to imitate: test the same skill at the same level, with a new context and new numbers. Do not reuse its wording.' : 'Use the examples only to match VCAA style. Do not reuse their wording or numbers.'}
 ${(request.variations || []).map((note) => `- ${note}`).join('\n')}
-
+${request.retry ? `
+Your previous attempt was rejected by the automatic checks: ${request.retry.reasons.join('; ')}.
+Its stem was: "${request.retry.stem.slice(0, 600)}"
+Write a clearly different question: change the function family or the situation, not just the letters and numbers, and keep every requirement above.
+` : ''}
 Output rules:
 - "stem": the question text. ${choice ? 'Do not put the options in the stem.' : 'For questions with parts, the stem is the shared lead-in.'}
 - "options": ${choice ? 'the options in order, without the letters.' : 'an empty array.'}
@@ -6206,15 +6210,21 @@ function latexProblems(text) {
 
 const plainWords = (text) => latexToPlain(String(text || '')).toLowerCase().match(/[a-z]+|\d+(?:\.\d+)?/g) || [];
 
-function textOverlap(a, b) {
+function wordOverlap(a, b) {
   const grams = (words) => new Set(words.slice(0, -3).map((w, i) => words.slice(i, i + 4).join(' ')));
-  const x = grams(plainWords(a));
-  const y = grams(plainWords(b));
+  const x = grams(a);
+  const y = grams(b);
   if (!x.size || !y.size) return 0;
   let same = 0;
   x.forEach((g) => { if (y.has(g)) same += 1; });
   return same / Math.min(x.size, y.size);
 }
+const textOverlap = (a, b) => wordOverlap(plainWords(a), plainWords(b));
+// 只看句子骨架：数字和单个字母（参数、变量名）都换成 #。用来发现“只把 w 换成 k、1 换成 2”的题。
+// LaTeX 命令名（\mathbb、\setminus、\displaystyle…）先去掉：同一个意思有多种写法，不能算作措辞不同。
+const skeleton = (text) => plainWords(String(text || '').replace(/\\[a-zA-Z]+/g, ' '))
+  .map((word) => (/^\d/.test(word) || word.length === 1 ? '#' : word));
+const skeletonOverlap = (a, b) => wordOverlap(skeleton(a), skeleton(b));
 
 // 本地检查：公式能渲染、分值对、选择题格式对、知识点规则判断一致、没有照抄范例。
 function localChecks(row, request, examples) {
@@ -6247,6 +6257,19 @@ function localChecks(row, request, examples) {
     return !mine.size || shared / mine.size >= 0.6;
   });
   if (copiedFrom) fatal.push('和范例的题干几乎一样，数字也没换');
+  // 换了数字和字母、但题干和小问跟样板一一对应：要求“加难一步”或“换情境”时不算完成，其他时候提醒老师。
+  const template = request.template;
+  if (template && row.gen_parts.length) {
+    const theirParts = (template.sub_parts || template.gen_parts || []).map((part) => part.text || '');
+    const alike = row.gen_parts.filter((part) => theirParts.some((text) => skeletonOverlap(part.text, text) > 0.5)).length;
+    const stemAlike = skeletonOverlap(row.stem, template.stem || template.text || '') > 0.5;
+    if (stemAlike && alike / row.gen_parts.length >= 0.6) {
+      const message = '和样板结构几乎一样：题干和小问一一对应，只换了字母和数字';
+      const required = [VARIATIONS.harder[1], VARIATIONS.context[1]];
+      if ((request.variations || []).some((note) => required.includes(note))) fatal.push(message);
+      else notes.push(message);
+    }
+  }
   const ruled = classifyByRules({ text: row.stem, sub_parts: row.gen_parts.map((p) => ({ ...p })), area: null }, { subject: request.subject, unit: 'Unit 3/4' }, state.taxonomy || DEFAULT_TAXONOMY);
   if (ruled && ruled.topic !== request.topic) notes.push(`本地规则判为 ${ruled.topic}`);
   return { notes, fatal };
@@ -6286,9 +6309,12 @@ ${pending.map((p) => `${p.label}: A = ${p.a} ; B = ${p.b}`).join('\n')}` }], COM
 // 出一道题：出题、本地检查、独立重做。本地检查不过就重出一次，还不过就放弃。
 async function generateQuestion(request, examples, spec, onStep) {
   let lastFatal = [];
+  let lastStem = '';
   for (let attempt = 0; attempt < 2; attempt++) {
     onStep(attempt ? '重新出题…' : '出题…');
-    const raw = await aiCall([...(await exampleParts(examples)), { text: generationPrompt(spec.text, request) }], QUESTION_SCHEMA);
+    // 重出时告诉模型上一次为什么没通过、写了什么，否则它容易犯同样的错。
+    const asked = attempt && lastFatal.length ? { ...request, retry: { reasons: lastFatal, stem: lastStem } } : request;
+    const raw = await aiCall([...(await exampleParts(examples)), { text: generationPrompt(spec.text, asked) }], QUESTION_SCHEMA);
     const row = {
       source_id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       generated: true,
@@ -6320,6 +6346,7 @@ async function generateQuestion(request, examples, spec, onStep) {
     const { notes, fatal } = localChecks(row, request, examples);
     if (fatal.length) {
       lastFatal = fatal;
+      lastStem = row.stem || '';
       aiState.rejected.push({ row, fatal }); // 留着被拦下的题，方便检查本地规则是否太严。
       continue;
     }

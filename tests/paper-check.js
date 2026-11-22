@@ -64,6 +64,30 @@
   check('措辞固定但数字换了不算照抄', localChecks(reworded, request, [{ text: stock }]).fatal.length === 0);
   const choice = { stem: 'Q', options: ['1', '2', '3', '4'], gen_parts: [], answers: [{ label: 'MC', value: 'E' }], solution: '' };
   check('选择题答案不在选项里时拒绝', localChecks(choice, { ...request, question_type: 'multiple choice', marks: 1 }, []).fatal.length > 0);
+  // 只换字母和数字、题干和小问与样板一一对应的题（真实出题时遇到过）。文字是自编的，不是真题。
+  const template = {
+    text: 'Consider the functions \\(p:\\mathbb{R}\\to\\mathbb{R}, p(x)=(x-a)^{2}\\) and \\(q:R\\setminus\\{3\\}\\to R, q(x)=\\frac{a}{x-3}\\), where \\(a\\in R\\).',
+    sub_parts: [
+      { label: 'a', text: 'If \\(a=2\\), find all values of \\(x\\) for which the two graphs meet.' },
+      { label: 'b', text: 'Find, in terms of \\(a\\), the coordinates of the turning point of the graph of \\(y=p(x)\\).' },
+      { label: 'c', text: 'Hence find the values of \\(a\\) for which the equation \\(p(x)=q(x)\\) has exactly two solutions.' },
+    ],
+  };
+  const isomorph = {
+    ...good,
+    stem: 'Consider the functions \\(p:R\\to R, p(x)=(x-b)^{2}\\) and \\(q:\\mathbb{R}\\setminus\\{5\\}\\to\\mathbb{R}, q(x)=\\frac{b}{x-5}\\), where \\(b\\in\\mathbb{R}\\).',
+    gen_parts: [
+      { label: 'a', text: 'If \\(b=4\\), find all values of \\(x\\) for which the two graphs meet.', marks: 1 },
+      { label: 'b', text: 'Find, in terms of \\(b\\), the coordinates of the turning point of the graph of \\(y=p(x)\\).', marks: 1 },
+      { label: 'c', text: 'Hence find the values of \\(b\\) for which the equation \\(p(x)=q(x)\\) has exactly two solutions.', marks: 2 },
+    ],
+  };
+  const harderRequest = { ...request, template, variations: [VARIATIONS.harder[1]] };
+  check('只换字母数字、要求加难时拒绝', localChecks(isomorph, harderRequest, [template]).fatal.some((f) => f.includes('结构')));
+  check('只换字母数字、普通仿题时提醒', localChecks(isomorph, { ...request, template, variations: [] }, [template]).notes.some((n) => n.includes('结构')));
+  check('结构不同的题不误报', !localChecks(good, harderRequest, [template]).fatal.some((f) => f.includes('结构')));
+  check('重出时告诉模型上次的原因', generationPrompt('spec', { ...harderRequest, retry: { reasons: ['原因甲'], stem: '上次的题干' } }).includes('原因甲') &&
+    !generationPrompt('spec', harderRequest).includes('previous attempt'));
   check('答案写法不同也算相同', sameAnswer('\\left( 2 \\right)', '(2)'));
   check('不同的答案不算相同', !sameAnswer('2', '3'));
 
