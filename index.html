@@ -262,6 +262,11 @@
   .crop-tools { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
   .tag.edited-crop { background: #e7f3f3; color: var(--accent); }
   .bank-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  #pickPanel .row { flex-wrap: wrap; }
+  #pickPanel .check { white-space: nowrap; }
+  #kList .pick { cursor: pointer; }
+  #kList .pick:has(input:checked) { outline: 2px solid var(--accent); }
+  #kList .pick-img { max-height: 280px; object-fit: cover; object-position: top; }
   .wix-mode .local-only { display: none; }
   .wix-status { background: #e7f3f3; }
   #bankPapers h4 { margin: 14px 0 6px; }
@@ -441,14 +446,41 @@
         </div>
         <div class="row"><button id="vRun" class="primary" type="button" disabled>按样板出题</button></div>
       </details>
+      <details id="pickPanel" class="panel paper-form">
+        <summary><strong>从题库选题</strong> <span class="hint">按条件筛选、勾选题目，导出 Word 或加入当前试卷</span></summary>
+        <div class="paper-grid">
+          <label class="field"><span>科目</span><select id="kSubject"></select></label>
+          <label class="field"><span>知识点</span><select id="kTopic"></select></label>
+          <label class="field"><span>难度</span><select id="kLevel"></select></label>
+          <label class="field"><span>题型</span><select id="kType"></select></label>
+          <label class="field"><span>来源试卷</span><select id="kPaper"></select></label>
+          <label class="field"><span>搜索题目文字</span><input id="kSearch" type="search" placeholder="例如 normal distribution"></label>
+        </div>
+        <label class="check"><input id="kAi" type="checkbox"> 包括审核通过的 AI 题</label>
+        <div class="row" style="margin-top:8px">
+          <button id="kAll" type="button">全选当前筛出的题</button>
+          <button id="kNone" type="button">清空已选</button>
+          <span id="kCount" class="hint"></span>
+        </div>
+        <div id="kList" class="picker"></div>
+        <div class="row" style="margin-top:6px"><button id="kMore" type="button" hidden>显示更多</button></div>
+        <div class="row" style="margin-top:8px">
+          <button id="kWord" class="primary" type="button" disabled>导出所选为 Word</button>
+          <button id="kAdd" type="button" disabled>加入当前试卷</button>
+          <label class="check"><input id="kRenumber" type="checkbox" checked> 按勾选顺序重新编号</label>
+          <label class="check"><input id="kSource" type="checkbox" checked> 每题注明来源</label>
+          <label class="check"><input id="kAnswers" type="checkbox"> 附答案页</label>
+        </div>
+      </details>
       <div id="paperWarn" class="alert warn" hidden></div>
       <p id="paperSummary" class="paper-summary"></p>
       <p id="paperCost" class="hint"></p>
       <div id="paperTools" class="row" hidden style="margin-bottom:10px">
         <button id="pPrint" type="button">打印 / 存为 PDF</button>
+        <button id="pWord" type="button">导出 Word</button>
         <button id="pExport" type="button">导出题目清单 CSV</button>
-        <label class="check"><input id="pAnswers" type="checkbox" checked> 打印时附答案页</label>
-        <span class="hint">裁图里仍是原卷题号，打印时以左上角的新题号为准。</span>
+        <label class="check"><input id="pAnswers" type="checkbox" checked> 附答案页（打印和 Word）</label>
+        <span class="hint">裁图里的原题号会换成新题号；Word 里 AI 出的题是可以编辑的文字和公式。</span>
       </div>
       <div id="paperList" class="cards"></div>
     </div>
@@ -5691,6 +5723,10 @@ async function openPaperView() {
   $('paperEmpty').hidden = subjects.length > 0;
   $('paperForm').hidden = subjects.length === 0;
   renderPaperTopics();
+  if ($('pickPanel').open) {
+    refreshPickFilters();
+    renderPickList();
+  }
 }
 
 function renderPaperTopics() {
@@ -5985,6 +6021,604 @@ function exportPaperList() {
   const lines = paperState.picked.map((row, index) => [index + 1, row.marks, questionMinutes(row), row.topic, row.difficulty || '',
     row.difficulty_source || '', row.question_type, row.source.label, row.source_id]);
   download('paper-list.csv', '﻿' + [header, ...lines].map((line) => line.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+/* ---------- 导出 Word（.docx）----------
+ * 直接拼 Word 的 XML（OOXML），用 JSZip 打包，不用另外的库。
+ * 真题放换好题号的裁图，按原卷的实际大小放，字号和原卷一样；超过一页高的裁图在空白行处切开。
+ * AI 出的题写成可以编辑的文字，公式用 KaTeX 解析后转成 Word 自己的公式（OMML），图形转成图片。
+ */
+const DOCX_PAGE = { width: 11906, height: 16838, margin: 1134 };            // A4，单位 twip（1/1440 英寸），页边距 2 厘米。
+const EMU_PER_TWIP = 635;
+const DOCX_TEXT_TWIP = DOCX_PAGE.width - 2 * DOCX_PAGE.margin;               // 正文宽度（17 厘米）。
+const DOCX_TEXT_EMU = DOCX_TEXT_TWIP * EMU_PER_TWIP;
+// 长裁图切成不超过半页高的几段：整页高的一段放不进上一页剩下的空间，会整段挪到下一页，留下大片空白。
+const DOCX_IMAGE_MAX_EMU = Math.round((DOCX_PAGE.height - 2 * DOCX_PAGE.margin) * 0.55) * EMU_PER_TWIP;
+const EMU_PER_CM = 360000;
+const SNAPSHOT_PX_PER_CM = PAGE_LONG_SIDE_PX / 29.7;                         // 裁图按 A4 长边 2200 像素渲染。
+
+const xmlEscape = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+
+// 普通文字。换行变成 Word 的换行。
+function wRun(text, { bold = false, italic = false, size = null, color = null } = {}) {
+  if (text === '' || text === null || text === undefined) return '';
+  const props = [bold ? '<w:b/>' : '', italic ? '<w:i/>' : '', color ? `<w:color w:val="${color}"/>` : '', size ? `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>` : ''].join('');
+  return String(text).split('\n').map((line, index) => `<w:r>${props ? `<w:rPr>${props}</w:rPr>` : ''}${index ? '<w:br/>' : ''}<w:t xml:space="preserve">${xmlEscape(line)}</w:t></w:r>`).join('');
+}
+
+function wPara(content, { align = null, after = 80, before = 0, keepNext = false, indent = null, tabs = null, pageBreakBefore = false } = {}) {
+  const props = [
+    keepNext ? '<w:keepNext/>' : '', pageBreakBefore ? '<w:pageBreakBefore/>' : '',
+    tabs ? `<w:tabs>${tabs.map(([kind, pos]) => `<w:tab w:val="${kind}" w:pos="${pos}"/>`).join('')}</w:tabs>` : '',
+    `<w:spacing w:before="${before}" w:after="${after}"/>`,
+    indent ? `<w:ind w:left="${indent.left || 0}" w:hanging="${indent.hanging || 0}"/>` : '',
+    align ? `<w:jc w:val="${align}"/>` : '',
+  ].join('');
+  return `<w:p><w:pPr>${props}</w:pPr>${content}</w:p>`;
+}
+
+/* LaTeX → Word 公式。用 KaTeX 的解析结果（和页面上显示公式的是同一个解析器），逐个节点换成 OMML。
+ * 认不出的写法退回成普通文字，不会丢内容。 */
+const MATH_SYMBOLS = {
+  alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ϵ', varepsilon: 'ε', zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'ϑ',
+  iota: 'ι', kappa: 'κ', lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ', sigma: 'σ', tau: 'τ', upsilon: 'υ', phi: 'ϕ',
+  varphi: 'φ', chi: 'χ', psi: 'ψ', omega: 'ω', Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π', Sigma: 'Σ',
+  Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω', infty: '∞', le: '≤', leq: '≤', ge: '≥', geq: '≥', ne: '≠', neq: '≠', times: '×', cdot: '⋅',
+  div: '÷', pm: '±', mp: '∓', to: '→', rightarrow: '→', leftarrow: '←', Rightarrow: '⇒', implies: '⇒', Leftarrow: '⇐', iff: '⇔',
+  Leftrightarrow: '⇔', in: '∈', notin: '∉', subset: '⊂', subseteq: '⊆', cup: '∪', cap: '∩', emptyset: '∅', varnothing: '∅',
+  approx: '≈', sim: '∼', equiv: '≡', propto: '∝', partial: '∂', nabla: '∇', angle: '∠', circ: '∘', ldots: '…', cdots: '⋯',
+  dots: '…', prime: '′', setminus: '∖', mid: '∣', vert: '|', lvert: '|', rvert: '|', Vert: '‖', langle: '⟨', rangle: '⟩',
+  forall: '∀', exists: '∃', neg: '¬', land: '∧', lor: '∨', perp: '⊥', parallel: '∥', therefore: '∴', because: '∵', degree: '°',
+  ast: '∗', star: '⋆', colon: ':', lbrace: '{', rbrace: '}', '{': '{', '}': '}', '%': '%', $: '$', '&': '&', '#': '#', _: '_',
+  backslash: '\\', quad: ' ', qquad: '  ', ',': ' ', ';': ' ', ':': ' ', '!': '', ' ': ' ', int: '∫', iint: '∬', oint: '∮',
+  sum: '∑', prod: '∏', lfloor: '⌊', rfloor: '⌋', lceil: '⌈', rceil: '⌉', bot: '⊥', top: '⊤', ell: 'ℓ', hbar: 'ℏ',
+};
+const DOUBLE_STRUCK = { R: 'ℝ', N: 'ℕ', Z: 'ℤ', Q: 'ℚ', C: 'ℂ', P: 'ℙ' };
+const NARY = { '\\int': ['∫', 'subSup'], '\\iint': ['∬', 'subSup'], '\\oint': ['∮', 'subSup'], '\\sum': ['∑', 'undOvr'], '\\prod': ['∏', 'undOvr'] };
+const ACCENTS = { '\\hat': '̂', '\\widehat': '̂', '\\bar': '̅', '\\vec': '⃗', '\\overrightarrow': '⃗', '\\dot': '̇', '\\ddot': '̈', '\\tilde': '̃', '\\widetilde': '̃', '\\check': '̌' };
+
+const mathSymbol = (text) => {
+  if (!text) return '';
+  if (text.startsWith('\\')) {
+    const name = text.slice(1);
+    return Object.prototype.hasOwnProperty.call(MATH_SYMBOLS, name) ? MATH_SYMBOLS[name] : name;
+  }
+  return text;
+};
+
+function mRun(text, style = {}) {
+  if (!text) return '';
+  const sty = style.plain ? '<m:rPr><m:sty m:val="p"/></m:rPr>' : style.bold ? '<m:rPr><m:sty m:val="b"/></m:rPr>' : '';
+  return `<m:r>${sty}<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr><m:t xml:space="preserve">${xmlEscape(text)}</m:t></m:r>`;
+}
+
+const asList = (value) => (Array.isArray(value) ? value : value ? [value] : []);
+const naryOf = (node) => {
+  const op = node && node.type === 'supsub' ? node.base : node;
+  return op && op.type === 'op' && op.symbol && NARY[op.name] ? { op, sub: node.type === 'supsub' ? node.sub : null, sup: node.type === 'supsub' ? node.sup : null } : null;
+};
+const isRelation = (node) => node && node.type === 'atom' && (node.family === 'rel' || (node.family === 'punct' && node.text === ','));
+
+function ommlNodes(nodes, style = {}) {
+  const list = asList(nodes);
+  let out = '';
+  for (let i = 0; i < list.length; i++) {
+    const nary = naryOf(list[i]);
+    if (!nary) {
+      out += ommlNode(list[i], style);
+      continue;
+    }
+    // 积分号、求和号后面直到等号（或逗号）为止的部分是被积式，放进 Word 公式的积分框里。
+    let j = i + 1;
+    while (j < list.length && !isRelation(list[j])) j += 1;
+    const [chr, loc] = NARY[nary.op.name];
+    const sub = nary.sub ? ommlNodes(nary.sub, style) : '';
+    const sup = nary.sup ? ommlNodes(nary.sup, style) : '';
+    out += `<m:nary><m:naryPr><m:chr m:val="${chr}"/><m:limLoc m:val="${loc}"/>${sub ? '' : '<m:subHide m:val="1"/>'}${sup ? '' : '<m:supHide m:val="1"/>'}</m:naryPr>`
+      + `<m:sub>${sub}</m:sub><m:sup>${sup}</m:sup><m:e>${ommlNodes(list.slice(i + 1, j), style)}</m:e></m:nary>`;
+    i = j - 1;
+  }
+  return out;
+}
+
+function ommlNode(node, style = {}) {
+  if (!node) return '';
+  const delim = (value) => (value === '.' ? '' : mathSymbol(value === '\\{' ? '{' : value === '\\}' ? '}' : value));
+  switch (node.type) {
+    case 'mathord':
+    case 'textord': {
+      const text = mathSymbol(node.text);
+      return mRun(style.doubleStruck && DOUBLE_STRUCK[text] ? DOUBLE_STRUCK[text] : text, style);
+    }
+    case 'atom':
+      return mRun(mathSymbol(node.text), style);
+    case 'spacing':
+      return mRun(mathSymbol(node.text) || ' ', { plain: true });
+    case 'text':
+      return ommlNodes(node.body, { ...style, plain: true });
+    case 'font': {
+      const font = String(node.font || '');
+      const next = { ...style };
+      if (font === 'mathbb' || font === 'Bbb') next.doubleStruck = true;
+      else if (/^(mathrm|textrm|mathsf|textsf|mathtt|texttt|operatorname)$/.test(font)) next.plain = true;
+      else if (/^(mathbf|textbf|boldsymbol|bm)$/.test(font)) next.bold = true;
+      return ommlNodes(node.body, next);
+    }
+    case 'operatorname':
+      return ommlNodes(node.body, { ...style, plain: true });
+    case 'op':
+      if (node.symbol && NARY[node.name]) return ommlNodes([node], style);
+      if (node.body) return ommlNodes(node.body, { ...style, plain: true });
+      return mRun(mathSymbol(node.name), { plain: !node.symbol });
+    case 'supsub': {
+      const base = node.base;
+      if (naryOf(node)) return ommlNodes([node], style);
+      const sub = node.sub ? ommlNodes(node.sub, style) : '';
+      const sup = node.sup ? ommlNodes(node.sup, style) : '';
+      // lim、max 和 \underset 一类：上下限写在正下方 / 正上方。
+      if (base && base.type === 'op' && !base.symbol && (base.limits || base.alwaysHandleSupSub)) {
+        const e = `<m:e>${ommlNode(base, style)}</m:e>`;
+        if (sub && !sup) return `<m:limLow>${e}<m:lim>${sub}</m:lim></m:limLow>`;
+        if (sup && !sub) return `<m:limUpp>${e}<m:lim>${sup}</m:lim></m:limUpp>`;
+      }
+      const e = `<m:e>${ommlNode(base, style)}</m:e>`;
+      if (sub && sup) return `<m:sSubSup>${e}<m:sub>${sub}</m:sub><m:sup>${sup}</m:sup></m:sSubSup>`;
+      if (sup) return `<m:sSup>${e}<m:sup>${sup}</m:sup></m:sSup>`;
+      if (sub) return `<m:sSub>${e}<m:sub>${sub}</m:sub></m:sSub>`;
+      return ommlNode(base, style);
+    }
+    case 'genfrac': {
+      const fraction = `<m:f>${node.hasBarLine ? '' : '<m:fPr><m:type m:val="noBar"/></m:fPr>'}<m:num>${ommlNodes(node.numer, style)}</m:num><m:den>${ommlNodes(node.denom, style)}</m:den></m:f>`;
+      if (!node.leftDelim && !node.rightDelim) return fraction;
+      return `<m:d><m:dPr><m:begChr m:val="${xmlEscape(delim(node.leftDelim || '.'))}"/><m:endChr m:val="${xmlEscape(delim(node.rightDelim || '.'))}"/></m:dPr><m:e>${fraction}</m:e></m:d>`;
+    }
+    case 'sqrt':
+      return `<m:rad><m:radPr>${node.index ? '' : '<m:degHide m:val="1"/>'}</m:radPr><m:deg>${node.index ? ommlNodes(node.index, style) : ''}</m:deg><m:e>${ommlNodes(node.body, style)}</m:e></m:rad>`;
+    case 'leftright':
+      return `<m:d><m:dPr><m:begChr m:val="${xmlEscape(delim(node.left))}"/><m:endChr m:val="${xmlEscape(delim(node.right))}"/></m:dPr><m:e>${ommlNodes(node.body, style)}</m:e></m:d>`;
+    case 'middle':
+      return mRun(delim(node.delim), style);
+    case 'accent': {
+      const chr = ACCENTS[node.label];
+      if (!chr) return ommlNodes(node.base, style);
+      return `<m:acc><m:accPr><m:chr m:val="${chr}"/></m:accPr><m:e>${ommlNodes(node.base, style)}</m:e></m:acc>`;
+    }
+    case 'overline':
+    case 'underline':
+      return `<m:bar><m:barPr><m:pos m:val="${node.type === 'overline' ? 'top' : 'bot'}"/></m:barPr><m:e>${ommlNodes(node.body, style)}</m:e></m:bar>`;
+    case 'array': {
+      const rows = (node.body || []).filter((row) => row.length && !(row.length === 1 && !row[0]));
+      return `<m:m>${rows.map((row) => `<m:mr>${row.map((cell) => `<m:e>${ommlNode(cell, style)}</m:e>`).join('')}</m:mr>`).join('')}</m:m>`;
+    }
+    case 'htmlmathml':
+      return ommlNodes(node.mathml, style);
+    case 'kern':
+      // \, \; \quad 在 KaTeX 里是一段空距：正的空距换成窄空格（比如 dx 前面），负的不管。
+      return node.dimension && node.dimension.number > 0 ? mRun(node.dimension.number >= 1 && node.dimension.unit === 'em' ? ' ' : ' ', { plain: true }) : '';
+    case 'raw':
+    case 'internal':
+    case 'tag':
+    case 'phantom':
+    case 'hphantom':
+    case 'vphantom':
+      return '';
+    default:
+      if (node.body) return ommlNodes(node.body, style);
+      if (node.base) return ommlNodes(node.base, style);
+      return node.text ? mRun(mathSymbol(node.text), style) : '';
+  }
+}
+
+function latexToOmml(tex) {
+  if (!window.katex || !window.katex.__parse) return null;
+  try {
+    const xml = ommlNodes(window.katex.__parse(String(tex), { throwOnError: true, strict: 'ignore', trust: false }));
+    return xml || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 一段带公式的文字 → Word 段落。行内公式 \( \) 留在句子里，\[ \] 单独成一段居中。
+function mathInline(tex) {
+  const omml = latexToOmml(tex);
+  return omml ? `<m:oMath>${omml}</m:oMath>` : wRun(latexToPlain(`\\(${tex}\\)`));
+}
+
+function inlineRuns(text, style = {}) {
+  return String(text).split(/\\\(([\s\S]*?)\\\)/g).map((piece, index) => {
+    if (index % 2) return mathInline(piece);
+    return piece.split(/\*\*(.+?)\*\*/g).map((part, k) => wRun(part.replace(/^\s*\*\s+/gm, '• '), { ...style, bold: style.bold || k % 2 === 1 })).join('');
+  }).join('');
+}
+
+function textParagraphs(text, options = {}, style = {}) {
+  const out = [];
+  String(text || '').split(/\\\[([\s\S]*?)\\\]/g).forEach((piece, index) => {
+    if (index % 2) {
+      const omml = latexToOmml(piece);
+      out.push(omml ? `<w:p><w:pPr><w:spacing w:before="60" w:after="60"/></w:pPr><m:oMathPara><m:oMath>${omml}</m:oMath></m:oMathPara></w:p>` : wPara(wRun(piece), options));
+      return;
+    }
+    piece.split(/\n+/).forEach((line) => { if (line.trim()) out.push(wPara(inlineRuns(line.trim(), style), options)); });
+  });
+  return out.join('');
+}
+
+// 图片：放进文档的 media 文件夹，返回段落。
+function docxImageRun(media, blob, widthEmu, heightEmu) {
+  const index = media.length + 1;
+  const extension = blob.type === 'image/jpeg' ? 'jpeg' : 'png';
+  media.push({ name: `image${index}.${extension}`, blob, rid: `rIdImg${index}` });
+  const id = index;
+  return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/>`
+    + `<wp:docPr id="${id}" name="Picture ${id}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>`
+    + '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>'
+    + `<pic:nvPicPr><pic:cNvPr id="${id}" name="image${index}.${extension}"/><pic:cNvPicPr/></pic:nvPicPr>`
+    + `<pic:blipFill><a:blip r:embed="rIdImg${index}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`
+    + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`
+    + '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+}
+
+const canvasBlob = (canvas, type = 'image/png') => new Promise((resolve) => canvas.toBlob(resolve, type, 0.92));
+
+// 裁图按原卷大小放；太高的切成几段，切在最长的一段空白中间（通常是小问之间），各段之间不留间距，看起来是连着的。
+async function snapshotParagraphs(media, src) {
+  const image = await loadImage(src);
+  const widthCm = Math.min(DOCX_TEXT_EMU / EMU_PER_CM, image.naturalWidth / SNAPSHOT_PX_PER_CM);
+  const emuPerPx = (widthCm * EMU_PER_CM) / image.naturalWidth;
+  const maxPx = Math.floor(DOCX_IMAGE_MAX_EMU / emuPerPx);
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0);
+  const blankRow = (y) => {
+    const { data } = context.getImageData(0, y, canvas.width, 1);
+    for (let i = 0; i < data.length; i += 4) if (data[i] + data[i + 1] + data[i + 2] < 690) return false;
+    return true;
+  };
+  const cuts = [];
+  let top = 0;
+  while (canvas.height - top > maxPx) {
+    // 在 [40%, 100%] 段高的范围里找最长的一段连续空白行，切在它中间；找不到就硬切。
+    const floor = top + Math.floor(maxPx * 0.4);
+    let best = null;
+    let runStart = -1;
+    for (let y = floor; y <= top + maxPx; y++) {
+      if (blankRow(y)) {
+        if (runStart < 0) runStart = y;
+      } else if (runStart >= 0) {
+        if (!best || y - runStart > best[1] - best[0]) best = [runStart, y];
+        runStart = -1;
+      }
+    }
+    if (runStart >= 0 && (!best || top + maxPx + 1 - runStart > best[1] - best[0])) best = [runStart, top + maxPx + 1];
+    const cut = best ? Math.round((best[0] + best[1]) / 2) : top + maxPx;
+    cuts.push([top, cut]);
+    top = cut;
+  }
+  cuts.push([top, canvas.height]);
+  const paragraphs = [];
+  for (const [index, [from, to]] of cuts.entries()) {
+    const piece = document.createElement('canvas');
+    piece.width = canvas.width;
+    piece.height = to - from;
+    piece.getContext('2d').drawImage(canvas, 0, from, canvas.width, to - from, 0, 0, canvas.width, to - from);
+    const blob = await canvasBlob(piece);
+    const last = index === cuts.length - 1;
+    paragraphs.push(`<w:p><w:pPr><w:spacing w:before="0" w:after="${last ? 60 : 0}" w:line="240" w:lineRule="auto"/></w:pPr>${docxImageRun(media, blob, Math.round(canvas.width * emuPerPx), Math.round((to - from) * emuPerPx))}</w:p>`);
+  }
+  return paragraphs.join('');
+}
+
+// AI 题的图：页面上的 SVG 画到画布上转成 PNG（2 倍清晰度），宽 12 厘米。
+async function figureParagraph(media, figure) {
+  const { width, height } = FIGURE_SIZE;
+  const svg = figureSvg(figure);
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svg.setAttribute('width', width);
+  svg.setAttribute('height', height);
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }));
+  try {
+    const image = await loadImage(url);
+    const canvas = document.createElement('canvas');
+    canvas.width = width * 2;
+    canvas.height = height * 2;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const widthEmu = 12 * EMU_PER_CM;
+    return wPara(docxImageRun(media, await canvasBlob(canvas), widthEmu, Math.round(widthEmu * height / width)), { align: 'center', after: 120 });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+const marksLabel = (marks) => `${marks} mark${marks === 1 ? '' : 's'}`;
+
+async function generatedParagraphs(media, row, number) {
+  const out = [wPara(wRun(`Question ${number}`, { bold: true }) + wRun(` (${marksLabel(row.marks)})`), { keepNext: true, before: 120 })];
+  out.push(textParagraphs(row.stem));
+  if (row.figure) {
+    try { out.push(await figureParagraph(media, row.figure)); } catch (e) { out.push(wPara(wRun(`（图形无法导出：${e.message || e}）`, { italic: true }))); }
+  }
+  (row.options || []).forEach((option, index) => {
+    out.push(wPara(wRun(`${String.fromCharCode(65 + index)}.`, { bold: true }) + '<w:r><w:tab/></w:r>' + inlineRuns(option), { indent: { left: 567, hanging: 567 }, after: 40 }));
+  });
+  // 小问：编号悬挂缩进，分值靠右（和 VCAA 试卷一样）。b.i 这种第一次出现时写成 “b. i.”，b 不能丢。
+  let lastTop = null;
+  (row.gen_parts || []).forEach((part) => {
+    const [top, sub] = String(part.label).replace(/\.$/, '').split('.');
+    const depth = sub ? 1 : 0;
+    const label = sub
+      ? (top !== lastTop ? wRun(`${top}.`, { bold: true }) + wRun(` ${sub}.`) : wRun(`${sub}.`))
+      : wRun(`${top}.`, { bold: true });
+    lastTop = top;
+    out.push(wPara(label + '<w:r><w:tab/></w:r>' + inlineRuns(part.text)
+      + `<w:r><w:tab/></w:r>${wRun(marksLabel(part.marks))}`, {
+      indent: { left: 567 * (depth + 1), hanging: 567 }, tabs: [['right', DOCX_TEXT_TWIP]], before: 80, after: 80,
+    }));
+  });
+  return out.join('');
+}
+
+// 生成 .docx：title、info 写在最前面；rows 是题库记录（真题或 AI 题）；withAnswers 附答案；showSource 每题下注明来源。
+async function buildDocx({ title, info, rows, withAnswers = false, showSource = false, renumber = true }) {
+  if (!window.JSZip) throw new UserError('打包组件未加载', 'JSZip 没能从 CDN 加载，请检查网络后刷新页面。');
+  const media = [];
+  const body = [
+    wPara(wRun(title, { bold: true, size: 32 }), { after: 60 }),
+    info ? wPara(wRun(info, { color: '444444' }), { after: 60 }) : '',
+    wPara(wRun('Name: ______________________________'), { after: 240 }),
+  ];
+  for (const [index, row] of rows.entries()) {
+    const number = index + 1;
+    if (row.generated) {
+      body.push(await generatedParagraphs(media, row, number));
+    } else {
+      const relabeled = renumber ? await relabeledSnapshot(row, number).catch(() => null) : null;
+      const original = await rowImage(row).catch(() => null);
+      // 换不了题号（旧版本入库、校内卷）时在上方写明新题号。
+      if (renumber && !relabeled) body.push(wPara(wRun(`Question ${number} (${marksLabel(row.marks)})`, { bold: true }) + wRun('  [图中为原卷题号]', { color: '888888', size: 18 }), { keepNext: true, before: 120 }));
+      const src = relabeled || original;
+      if (src) body.push(await snapshotParagraphs(media, src));
+      else body.push(wPara(wRun(`（这道题没有裁图：${row.source.label}）`, { italic: true })));
+    }
+    if (showSource) body.push(wPara(wRun(`来源：${row.source.label}${row.topic ? ` · ${row.topic}` : ''}`, { color: '888888', size: 18 }), { after: 160 }));
+    else body.push(wPara('', { after: 120 }));
+  }
+  if (withAnswers) {
+    body.push(wPara(wRun('Answers', { bold: true, size: 28 }), { pageBreakBefore: true, after: 120 }));
+    rows.forEach((row, index) => {
+      body.push(wPara(wRun(`Question ${index + 1}`, { bold: true }), { keepNext: true, before: 120 }));
+      if (row.generated) {
+        // AI 给的答案有时是不带 \( \) 的 LaTeX（如 v_x(t) = 50 e^{-0.2 t}），这时整条当公式。
+        const asMath = (value) => (/\\\(|\\\[/.test(value) || !/[\\^_{}]/.test(value) ? value : `\\(${value}\\)`);
+        body.push(wPara(inlineRuns(row.answers.map((a) => `${a.label === 'MC' ? '' : `${a.label}. `}${asMath(String(a.value))}`).join('；'))));
+        body.push(textParagraphs(row.solution));
+        if (row.marking) body.push(textParagraphs(`Marking: ${row.marking}`, {}, { color: '555555' }));
+      } else {
+        body.push(wPara(wRun(`原卷题目，答案见 VCAA 评分报告：${row.source.label}`, { color: '555555' })));
+      }
+    });
+  }
+  const sect = `<w:sectPr><w:footerReference w:type="default" r:id="rIdFooter"/><w:pgSz w:w="${DOCX_PAGE.width}" w:h="${DOCX_PAGE.height}"/>`
+    + `<w:pgMar w:top="${DOCX_PAGE.margin}" w:right="${DOCX_PAGE.margin}" w:bottom="${DOCX_PAGE.margin}" w:left="${DOCX_PAGE.margin}" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>`;
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    + 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    + 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${body.join('')}${sect}</w:body></w:document>`;
+  const footer = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${ns}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>`
+    + '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    + '</w:p></w:ftr>';
+  const styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    + '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Microsoft YaHei" w:cs="Arial"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-AU" w:eastAsia="zh-CN"/></w:rPr></w:rPrDefault>'
+    + '<w:pPrDefault><w:pPr><w:spacing w:after="80" w:line="264" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>'
+    + '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>';
+  const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    + '<Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>'
+    + media.map((item) => `<Relationship Id="${item.rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${item.name}"/>`).join('')
+    + '</Relationships>';
+  const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+    + '<Default Extension="png" ContentType="image/png"/><Default Extension="jpeg" ContentType="image/jpeg"/>'
+    + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    + '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+    + '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
+    + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>';
+  const core = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+    + 'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+    + `<dc:title>${xmlEscape(title)}</dc:title><dc:creator>VCE 试卷工具</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}</dcterms:created></cp:coreProperties>`;
+  const zip = new window.JSZip();
+  zip.file('[Content_Types].xml', contentTypes);
+  zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+    + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>');
+  zip.file('docProps/core.xml', core);
+  zip.file('word/document.xml', documentXml);
+  zip.file('word/styles.xml', styles);
+  zip.file('word/footer1.xml', footer);
+  zip.file('word/_rels/document.xml.rels', rels);
+  media.forEach((item) => zip.file(`word/media/${item.name}`, item.blob));
+  return zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+}
+
+const docxName = (title) => `${String(title).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60) || 'paper'}.docx`;
+
+async function exportPaperWord() {
+  const { picked, options } = paperState;
+  if (!picked.length) return;
+  const button = $('pWord');
+  button.disabled = true;
+  button.textContent = '正在生成 Word…';
+  try {
+    const marks = picked.reduce((sum, row) => sum + (row.marks || 0), 0);
+    const title = $('pTitle').value.trim() || `${options.subject} 练习卷`;
+    const blob = await buildDocx({
+      title, rows: picked, withAnswers: $('pAnswers').checked,
+      info: `Time: ${options.minutes} minutes · ${picked.length} questions · ${marks} marks`,
+    });
+    download(docxName(title), blob, blob.type);
+  } catch (e) {
+    showAlert($('paperWarn'), e.title || '导出 Word 失败', e.message || String(e));
+  } finally {
+    button.disabled = false;
+    button.textContent = '导出 Word';
+  }
+}
+
+/* ---------- 从题库选题 ----------
+ * 按科目、知识点、难度、题型、来源试卷和题目文字筛选，勾选后导出 Word 或加入当前试卷。勾选的先后就是题目的顺序。 */
+const PICK_PAGE = 60;   // 一次显示多少题，太多时点“显示更多”。
+const pickState = { selected: [], shown: PICK_PAGE };
+
+const paperLabel = (row) => (row.generated ? 'AI 出题' : [row.source.year, row.source.publisher, row.source.paper_title, row.source.paper_type].filter((p) => p !== null && p !== undefined && p !== '').join(' '));
+const naturalNumber = (value) => { const n = parseFloat(value); return Number.isFinite(n) ? n : 1e9; };
+
+function fillSelect(select, options, keep = true) {
+  const previous = select.value;
+  select.textContent = '';
+  options.forEach(([value, label]) => select.append(new Option(label, value)));
+  if (keep && options.some(([value]) => value === previous)) select.value = previous;
+}
+
+function pickRows() {
+  const subject = $('kSubject').value;
+  const topic = $('kTopic').value;
+  const level = $('kLevel').value;
+  const type = $('kType').value;
+  const paper = $('kPaper').value;
+  const words = $('kSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return paperState.rows
+    .filter((row) => (row.generated ? $('kAi').checked && row.status === 'approved' : hasImage(row)))
+    .filter((row) => !subject || row.subject === subject)
+    .filter((row) => !topic || row.topic === topic)
+    .filter((row) => !level || (row.difficulty || 'none') === level)
+    .filter((row) => !type || row.question_type === type)
+    .filter((row) => !paper || paperLabel(row) === paper)
+    .filter((row) => {
+      if (!words.length) return true;
+      // 真题的小问在 sub_parts，AI 题的在 gen_parts，选项在 options。
+      const text = latexToPlain([row.text, row.stem || '', ...(row.sub_parts || []).map((p) => p.text), ...(row.gen_parts || []).map((p) => p.text), ...(row.options || [])].join(' ')).toLowerCase();
+      return words.every((word) => text.includes(word));
+    })
+    .sort((a, b) => paperLabel(a).localeCompare(paperLabel(b)) || String(a.section || '').localeCompare(String(b.section || ''))
+      || naturalNumber(a.question_number) - naturalNumber(b.question_number) || String(a.created || '').localeCompare(String(b.created || '')));
+}
+
+function refreshPickFilters() {
+  const rows = paperState.rows.filter((row) => !row.generated || row.status === 'approved');
+  const subjects = [...new Set(rows.map((row) => row.subject).filter(Boolean))].sort();
+  fillSelect($('kSubject'), [['', '全部科目'], ...subjects.map((s) => [s, s])]);
+  const inSubject = rows.filter((row) => !$('kSubject').value || row.subject === $('kSubject').value);
+  const order = topicsForSubject(state.taxonomy || DEFAULT_TAXONOMY, $('kSubject').value || subjects[0] || '');
+  const topics = [...new Set(inSubject.map((row) => row.topic).filter(Boolean))].sort((a, b) => order.indexOf(a) - order.indexOf(b) || a.localeCompare(b));
+  fillSelect($('kTopic'), [['', '全部知识点'], ...topics.map((t) => [t, t])]);
+  fillSelect($('kLevel'), [['', '全部难度'], ...DIFFICULTIES, ['none', '未标难度']]);
+  fillSelect($('kType'), [['', '全部题型'], ...QUESTION_TYPES]);
+  const papers = [...new Set(inSubject.map(paperLabel))].sort();
+  fillSelect($('kPaper'), [['', '全部试卷'], ...papers.map((p) => [p, p])]);
+}
+
+function renderPickCount() {
+  const rows = pickState.selected.map((id) => paperState.rows.find((row) => row.source_id === id)).filter(Boolean);
+  const marks = rows.reduce((sum, row) => sum + (row.marks || 0), 0);
+  $('kCount').textContent = rows.length ? `已选 ${rows.length} 题，共 ${marks} 分` : '还没有选题';
+  $('kWord').disabled = !rows.length;
+  $('kAdd').disabled = !rows.length;
+}
+
+function renderPickList() {
+  const host = $('kList');
+  host.textContent = '';
+  const rows = pickRows();
+  rows.slice(0, pickState.shown).forEach((row) => {
+    const item = el('label', 'pick');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = pickState.selected.includes(row.source_id);
+    box.addEventListener('change', () => {
+      pickState.selected = pickState.selected.filter((id) => id !== row.source_id);
+      if (box.checked) pickState.selected.push(row.source_id);
+      renderPickCount();
+    });
+    const head = el('div', 'row');
+    head.append(box, el('span', 'hint', `${row.generated ? 'AI 出题' : row.source.label} · ${row.marks} 分 · ${DIFFICULTY_LABELS[row.difficulty] || '未标难度'}`));
+    item.append(head, el('div', 'hint', row.topic || ''));
+    if (row.generated) {
+      item.append(generatedBody(row, true));
+    } else {
+      const image = el('img', 'pick-img');
+      image.alt = row.source.label;
+      image.loading = 'lazy';
+      rowImage(row).then((url) => { if (url) image.src = url; }).catch(() => {});
+      item.append(image);
+    }
+    host.append(item);
+  });
+  renderMath(host);
+  if (!rows.length) host.append(el('p', 'hint', '没有符合条件的题。'));
+  $('kMore').hidden = rows.length <= pickState.shown;
+  $('kMore').textContent = `显示更多（还有 ${Math.max(0, rows.length - pickState.shown)} 题）`;
+  renderPickCount();
+}
+
+function pickedRows() {
+  return pickState.selected.map((id) => paperState.rows.find((row) => row.source_id === id)).filter(Boolean);
+}
+
+async function exportPickedWord() {
+  const rows = pickedRows();
+  if (!rows.length) return;
+  const button = $('kWord');
+  button.disabled = true;
+  button.textContent = '正在生成 Word…';
+  try {
+    const subjects = [...new Set(rows.map((row) => row.subject))];
+    const marks = rows.reduce((sum, row) => sum + (row.marks || 0), 0);
+    const title = `${subjects.length === 1 ? subjects[0] : 'VCE'} 题库选题`;
+    const blob = await buildDocx({
+      title, rows, withAnswers: $('kAnswers').checked, showSource: $('kSource').checked, renumber: $('kRenumber').checked,
+      info: `${rows.length} questions · ${marks} marks`,
+    });
+    download(docxName(title), blob, blob.type);
+  } catch (e) {
+    showAlert($('paperWarn'), e.title || '导出 Word 失败', e.message || String(e));
+  } finally {
+    button.textContent = '导出所选为 Word';
+    renderPickCount();
+  }
+}
+
+function addPickedToPaper() {
+  const rows = pickedRows().filter((row) => !paperState.picked.includes(row));
+  paperState.picked = [...paperState.picked, ...rows];
+  paperState.options = paperState.options || paperOptions();
+  paperState.warnings = rows.length ? [`从题库加入了 ${rows.length} 道题，排在最后。`] : ['所选的题都已经在试卷里。'];
+  renderPaperView();
+}
+
+function initBankPicker() {
+  const rerender = () => { pickState.shown = PICK_PAGE; renderPickList(); };
+  $('pickPanel').addEventListener('toggle', () => { if ($('pickPanel').open) { refreshPickFilters(); renderPickList(); } });
+  $('kSubject').addEventListener('change', () => { refreshPickFilters(); rerender(); });
+  ['kTopic', 'kLevel', 'kType', 'kPaper', 'kAi'].forEach((id) => $(id).addEventListener('change', rerender));
+  let timer = null;
+  $('kSearch').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(rerender, 250); });
+  $('kMore').addEventListener('click', () => { pickState.shown += PICK_PAGE; renderPickList(); });
+  $('kAll').addEventListener('click', () => {
+    pickRows().forEach((row) => { if (!pickState.selected.includes(row.source_id)) pickState.selected.push(row.source_id); });
+    renderPickList();
+  });
+  $('kNone').addEventListener('click', () => { pickState.selected = []; renderPickList(); });
+  $('kWord').addEventListener('click', exportPickedWord);
+  $('kAdd').addEventListener('click', addPickedToPaper);
 }
 
 function showView(name) {
@@ -9892,6 +10526,8 @@ function init() {
   $('pAgain').addEventListener('click', () => buildPaper(true));
   $('pPrint').addEventListener('click', () => { printPaper().catch((e) => showAlert($('paperWarn'), '打印失败', String(e))); });
   $('pExport').addEventListener('click', exportPaperList);
+  $('pWord').addEventListener('click', exportPaperWord);
+  initBankPicker();
   initAiUi();
   initVariantUi();
   $('bankCsv').addEventListener('click', exportBankCsv);

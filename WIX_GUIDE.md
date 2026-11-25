@@ -108,6 +108,7 @@ Wix 写入时字段不存在会自动加上，但先建好类型更稳妥。单�
 | web method 的参数和返回值大小上限 | 没有查到文档 | 经后端转存、读取的文件过大时会失败，需要拆分 |
 | HTML 组件里 `location.ancestorOrigins` 和消息来源 | Wix 是否多套一层 iframe 没有文档 | 已在加载器里写明网站地址作为备用判断 |
 | `mediaManager.getFileInfo`、`moveFilesToTrash` 的用法 | 按 API 名称使用，没有逐条核对文档 | 改动在 `vceCore.js` 的 `assetConfirm` 和 `trash` |
+| HTML 组件里能否下载文件 | 导出 Word、导出题库 ZIP 都是在页面里生成文件再下载；HTML 组件的 iframe 是否允许下载没有文档 | 不行的话，改为把文件传到媒体库，给一个下载链接 |
 | `wixData` 查询的 `skip` 上限 | 题目很多时（上万）分页可能受限 | 改为按 `next()` 翻页 |
 
 ## 8. 备用方案（第 6 节第 1 项失败时）

@@ -112,6 +112,27 @@
     failures.push('math.js 没有加载，跳过画图检查');
   }
 
+  // 导出 Word：常见公式都能转成 Word 公式，生成的 XML 合法。
+  if (window.katex && window.katex.__parse) {
+    const formulas = [
+      '\\frac{dy}{dx} = 3x^2', '\\int_0^{\\frac{\\pi}{4}} (g(x) - f(x)) \\, dx', '\\sum_{k=1}^{n} k', '\\lim_{x \\to \\infty} e^{-x}',
+      '\\sqrt{3}', '\\sqrt[3]{x}', '\\binom{5}{2}', '\\left( x - \\frac{\\pi}{4} \\right)^2', '\\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix}',
+      'f(x) = \\begin{cases} x & x \\ge 0 \\\\ 0 & \\text{otherwise} \\end{cases}', '\\overrightarrow{AB}', '\\underset{\\sim}{\\mathrm{i}}',
+      'x \\in \\mathbb{R} \\setminus \\{0\\}', '\\Pr(X > 1) \\ne \\hat{p}', '\\mathbf{r}(t) = 250(1 - e^{-0.2 t})\\mathbf{i}', '\\theta \\le \\frac{\\pi}{2}',
+    ];
+    const failed = formulas.filter((tex) => !latexToOmml(tex));
+    check(`公式都能转成 Word 公式（没转成的：${failed.join('，')}）`, failed.length === 0);
+    const xml = `<r xmlns:m="m" xmlns:w="w">${formulas.map(latexToOmml).join('')}${textParagraphs('Let \\(f(x)=x^2\\) & <a>.\n\\[ \\int_0^1 f(x)\\,dx \\]')}</r>`;
+    check('Word 公式和段落是合法的 XML', !new DOMParser().parseFromString(xml, 'application/xml').querySelector('parsererror'));
+    const integral = latexToOmml('\\int_0^1 x \\, dx = \\frac{1}{2}');
+    const runText = (xmlText) => [...xmlText.matchAll(/<m:t[^>]*>([^<]*)<\/m:t>/g)].map((m) => m[1]).join('');
+    const end = integral.indexOf('</m:nary>');
+    check('积分号后面的式子放进积分里，等号留在外面', runText(integral.slice(integral.lastIndexOf('<m:e>', end), end)) === 'x dx' && runText(integral.slice(end)).startsWith('='));
+    check('ℝ 用空心字母', latexToOmml('\\mathbb{R}').includes('ℝ'));
+  } else {
+    failures.push('KaTeX 没有加载，跳过 Word 公式检查');
+  }
+
   window.paperCheckReport = failures;
   console.log(failures.length ? `组卷检查失败：${failures.join('；')}` : '组卷检查全部通过');
 })();
