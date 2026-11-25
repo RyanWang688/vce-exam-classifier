@@ -91,12 +91,22 @@
       if (gt) {
         entry.expected = gt.formulas.length;
         // 按题号对上标准答案（标准答案按阅读顺序编号 1..n）。
-        const scores = gt.formulas.map((formula, index) => {
-          const q = qs.find((x) => String(x.question_number).replace(/\D/g, '') === String(index + 1)) || qs[index];
-          return q ? similarity([q.text, ...q.sub_parts.map((p) => p.text)].join(' '), formula.latex) : 0;
+        const textOf = (q) => [q.text, ...(q.sub_parts || []).map((p) => p.text)].join(' ');
+        const pick = (index) => {
+          const position = qs.findIndex((x) => String(x.question_number).replace(/\D/g, '') === String(index + 1));
+          return position >= 0 ? position : index;
+        };
+        const scores = gt.formulas.map((formula, index) => (qs[pick(index)] ? similarity(textOf(qs[pick(index)]), formula.latex) : 0));
+        // 第一遍的读法（开了第二遍核对时才有），用来看第二遍有没有帮助。
+        const firsts = gt.formulas.map((formula, index) => {
+          const first = (state.handwritingFirst || [])[pick(index)] || qs[pick(index)];
+          return first ? similarity(textOf(first), formula.latex) : 0;
         });
         entry.exact = scores.filter((s) => s === 1).length;
         entry.similarity = +(scores.reduce((sum, s) => sum + s, 0) / scores.length).toFixed(3);
+        entry.exactFirst = firsts.filter((s) => s === 1).length;
+        entry.similarityFirst = +(firsts.reduce((sum, s) => sum + s, 0) / firsts.length).toFixed(3);
+        entry.changed = gt.formulas.map((f, i) => (Math.abs(scores[i] - firsts[i]) > 1e-9 ? `#${i + 1} ${firsts[i].toFixed(2)}→${scores[i].toFixed(2)}` : null)).filter(Boolean);
         entry.numbers = qs.map((q) => q.question_number).join(',');
         entry.worst = gt.formulas.map((f, i) => ({ i: i + 1, s: +scores[i].toFixed(2), want: f.latex, got: (qs.find((x) => String(x.question_number).replace(/\D/g, '') === String(i + 1)) || qs[i] || {}).text }))
           .filter((x) => x.s < 1).sort((a, b) => a.s - b.s).slice(0, 3);
